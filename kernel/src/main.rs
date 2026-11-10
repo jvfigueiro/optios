@@ -3,8 +3,8 @@
 // Item: Kernel Main Entry Point (_start) & Text Console Boot
 // Date: 2026-11-10
 
-//! OptiOS Kernel Main Entry Point (_start) — Milestone 9:
-//! PS/2 Mouse Driver (IRQ 12), Window Compositor & Desktop Environment.
+//! OptiOS Kernel Main Entry Point (_start) — Milestone 10:
+//! Read-Only FAT32 Storage VFS Mounts, Raw Mode Keyboard & Ring 3 Text Inspector.
 
 #![no_std]
 #![no_main]
@@ -53,7 +53,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     info!("========================================================");
-    info!("OptiOS Kernel — Milestone 9: PS/2 Mouse, Window Compositor & Desktop Environment");
+    info!("OptiOS Kernel — Milestone 10: FAT32 Storage VFS Mounts & Ring 3 Text Inspector");
     info!("========================================================");
 
     // 2. Validate Limine Base Revision Protocol Handshake
@@ -223,7 +223,21 @@ pub extern "C" fn _start() -> ! {
     sti();
 
     // 16. Initialize Read-Only SATA AHCI 1.0 Controller & inspect drives
-    let _ahci_info = ahci::init(&pci_devices);
+    let ahci_info = ahci::init(&pci_devices);
+
+    // 16.1 Mount FAT32 Partition 1 of AHCI Port 0 at /mnt/sda1
+    if let Some(port0) = ahci::get_port(0) {
+        if let Some(p1) = ahci_info
+            .drives
+            .iter()
+            .find(|d| d.port_number == 0)
+            .and_then(|d| d.partitions.first())
+        {
+            let _ = vfs::mount_fat32_sda1(port0, p1.start_lba, p1.sector_count);
+        } else {
+            let _ = vfs::mount_fat32_sda1(port0, 2048, 32768);
+        }
+    }
 
     // 17. Initialize Syscall Subsystem (AMD64 MSRs, TSS kernel stack, dispatcher)
     syscall::init();

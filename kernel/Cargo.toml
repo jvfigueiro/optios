@@ -11,6 +11,7 @@ optios-partition-table = { path = "../libs/partition-table" }
 optios-elf-loader = { path = "../libs/elf-loader" }
 optios-ansi-parser = { path = "../libs/ansi-parser" }
 optios-wm = { path = "../libs/opti-wm" }
+optios-fat32 = { path = "../libs/fat32" }
 
 [features]
 default = []

@@ -1,13 +1,142 @@
 #!/usr/bin/env python3
 # OptiOS
 # Copyright (C) 2026 João Figueiró. All rights reserved
-# Item: Script to Generate a 64 MiB Disk Image with a Valid GPT Partition Table
+# Item: Script to Generate a 64 MiB Disk Image with GPT Partition Table & FAT32 Volume
 # Date: 2026-11-10
 
 import os
 import struct
 import sys
 import zlib
+
+def format_fat32_partition(image: bytearray, start_lba: int, total_sectors: int):
+    sector_size = 512
+    p_offset = start_lba * sector_size
+
+    # FAT32 Parameters
+    bytes_per_sector = 512
+    sectors_per_cluster = 1
+    reserved_sectors = 32
+    num_fats = 2
+    sectors_per_fat = 256
+    root_cluster = 2
+
+    # 1. BPB (Sector 0)
+    bpb = bytearray(sector_size)
+    bpb[0:3] = b"\xEB\x58\x90"
+    bpb[3:11] = b"MSWIN4.1"
+    struct.pack_into("<H", bpb, 11, bytes_per_sector)
+    bpb[13] = sectors_per_cluster
+    struct.pack_into("<H", bpb, 14, reserved_sectors)
+    bpb[16] = num_fats
+    bpb[21] = 0xF8 # Media: Fixed disk
+    struct.pack_into("<I", bpb, 32, total_sectors)
+    struct.pack_into("<I", bpb, 36, sectors_per_fat)
+    struct.pack_into("<I", bpb, 44, root_cluster)
+    bpb[66] = 0x29
+    struct.pack_into("<I", bpb, 67, 0x12345678)
+    bpb[71:82] = b"OPTIO_REC  "
+    bpb[82:90] = b"FAT32   "
+    bpb[510] = 0x55
+    bpb[511] = 0xAA
+    image[p_offset : p_offset + sector_size] = bpb
+
+    # 2. FAT1 & FAT2
+    fat1_offset = p_offset + (reserved_sectors * sector_size)
+    fat2_offset = p_offset + ((reserved_sectors + sectors_per_fat) * sector_size)
+
+    fat_data = bytearray(sectors_per_fat * sector_size)
+    # Cluster 0 & 1 reserved
+    struct.pack_into("<I", fat_data, 0, 0x0FFFFFF8)
+    struct.pack_into("<I", fat_data, 4, 0x0FFFFFFF)
+    # Cluster 2 (Root Dir): EOC
+    struct.pack_into("<I", fat_data, 8, 0x0FFFFFFF)
+    # Cluster 3 (recovery_log.txt): EOC
+    struct.pack_into("<I", fat_data, 12, 0x0FFFFFFF)
+    # Cluster 4 (README.TXT): EOC
+    struct.pack_into("<I", fat_data, 16, 0x0FFFFFFF)
+
+    image[fat1_offset : fat1_offset + len(fat_data)] = fat_data
+    image[fat2_offset : fat2_offset + len(fat_data)] = fat_data
+
+    # 3. Data area: Cluster 2 (Root Directory)
+    data_start_sector = reserved_sectors + (num_fats * sectors_per_fat) # 32 + 512 = 544
+    root_dir_offset = p_offset + (data_start_sector * sector_size)
+
+    # Directory entries
+    root_dir = bytearray(sectors_per_cluster * sector_size)
+
+    # Entry 0: Volume label
+    root_dir[0:11] = b"OPTIO_REC  "
+    root_dir[11] = 0x08
+
+    # Entry 1 & 2 & 3: recovery_log.txt
+    # LFN 2 (seq 2 | 0x40): "txt\0"
+    e1 = bytearray(32)
+    e1[0] = 0x42
+    # chars 1..5: 't', 'x', 't', 0x00, 0xFF
+    e1[1] = ord('t'); e1[3] = ord('x'); e1[5] = ord('t')
+    e1[7] = 0x00; e1[8] = 0x00
+    e1[9] = 0xFF; e1[10] = 0xFF
+    e1[11] = 0x0F
+    for c in range(6):
+        e1[14 + c * 2] = 0xFF; e1[15 + c * 2] = 0xFF
+    e1[28] = 0xFF; e1[29] = 0xFF; e1[30] = 0xFF; e1[31] = 0xFF
+
+    # LFN 1 (seq 1): "recovery_log."
+    e2 = bytearray(32)
+    e2[0] = 0x01
+    txt1 = "recovery_log.".encode("utf-16le")
+    for i in range(13):
+        b0 = txt1[i*2]
+        b1 = txt1[i*2+1]
+        if i < 5:
+            e2[1 + i*2] = b0; e2[2 + i*2] = b1
+        elif i < 11:
+            idx = i - 5
+            e2[14 + idx*2] = b0; e2[15 + idx*2] = b1
+        else:
+            idx = i - 11
+            e2[28 + idx*2] = b0; e2[29 + idx*2] = b1
+    e2[11] = 0x0F
+
+    recovery_text = (
+        "OptiOS Hardware Diagnostic & System Recovery Log\n"
+        "Target: /dev/sda1 (AHCI Port 0 Partition 1)\n"
+        "Status: Clean Recovery Data Verified\n"
+    ).encode("ascii")
+
+    # 8.3 Entry for recovery_log.txt
+    e3 = bytearray(32)
+    e3[0:11] = b"RECOVE~1TXT"
+    e3[11] = 0x20 # Archive
+    struct.pack_into("<H", e3, 26, 3) # Cluster 3
+    struct.pack_into("<I", e3, 28, len(recovery_text))
+
+    # Entry 4: README.TXT (Cluster 4)
+    readme_text = (
+        "Welcome to OptiOS FAT32 Recovery Partition!\n"
+        "Mountpoint: /mnt/sda1\n"
+    ).encode("ascii")
+    e4 = bytearray(32)
+    e4[0:11] = b"README  TXT"
+    e4[11] = 0x20
+    struct.pack_into("<H", e4, 26, 4) # Cluster 4
+    struct.pack_into("<I", e4, 28, len(readme_text))
+
+    root_dir[32:64] = e1
+    root_dir[64:96] = e2
+    root_dir[96:128] = e3
+    root_dir[128:160] = e4
+    image[root_dir_offset : root_dir_offset + len(root_dir)] = root_dir
+
+    # 4. Cluster 3: recovery_log.txt data
+    c3_offset = p_offset + ((data_start_sector + (3 - 2) * sectors_per_cluster) * sector_size)
+    image[c3_offset : c3_offset + len(recovery_text)] = recovery_text
+
+    # 5. Cluster 4: README.TXT data
+    c4_offset = p_offset + ((data_start_sector + (4 - 2) * sectors_per_cluster) * sector_size)
+    image[c4_offset : c4_offset + len(readme_text)] = readme_text
 
 def create_gpt_disk(image_path: str, size_mib: int = 64):
     sector_size = 512
@@ -43,7 +172,8 @@ def create_gpt_disk(image_path: str, size_mib: int = 64):
     ])
     p1_unique_guid = b"\x11" * 16
     p1_start_lba = 2048
-    p1_end_lba = 2048 + (16 * 1024 * 1024 // sector_size) - 1 # 34815
+    p1_sectors = 16 * 1024 * 1024 // sector_size # 32768 sectors
+    p1_end_lba = p1_start_lba + p1_sectors - 1   # 34815
     p1_attrs = 0
     p1_name = "EFI System Partition".encode("utf-16le")
 
@@ -58,6 +188,9 @@ def create_gpt_disk(image_path: str, size_mib: int = 64):
         p1_attrs
     )
     entries[56:56 + len(p1_name)] = p1_name
+
+    # Format Partition 1 as FAT32 filesystem containing recovery_log.txt
+    format_fat32_partition(image, p1_start_lba, p1_sectors)
 
     # Partition 2: OptiOS Customer Data (46 MiB)
     # GUID EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
@@ -144,7 +277,7 @@ def create_gpt_disk(image_path: str, size_mib: int = 64):
     os.makedirs(os.path.dirname(os.path.abspath(image_path)), exist_ok=True)
     with open(image_path, "wb") as f:
         f.write(image)
-    print(f"==> Formatted {size_mib} MiB GPT disk image at {image_path} with 2 partitions.")
+    print(f"==> Formatted {size_mib} MiB GPT disk image at {image_path} with FAT32 on Partition 1.")
 
 if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else "build/test_disk.img"

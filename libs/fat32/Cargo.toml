@@ -1,0 +1,10 @@
+[package]
+name = "optios-fat32"
+version = "0.1.0"
+edition = "2021"
+authors = ["João Figueiró"]
+description = "Pure #![no_std] Read-Only FAT32 driver with LFN support for OptiOS"
+license = "Proprietary"
+
+[dependencies]
+optios-ahci-proto = { path = "../ahci-proto" }

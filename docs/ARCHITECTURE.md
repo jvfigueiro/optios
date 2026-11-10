@@ -21,7 +21,7 @@ The kernel is structured in modular layers with strict boundaries:
 +--------------------------------------------------------+
 |                     User Space                         |
 |     (Unprivileged Ring 3: /bin/optifetch, /bin/cat,    |
-|      /bin/sysinfo, libs/opti-libc dynamic brk heap)    |
+|      /bin/edit, /bin/sysinfo, libs/opti-libc brk heap) |
 +--------------------------------------------------------+
                            |
                            v  (POSIX System Calls: SYS_READ, WRITE, OPEN, CLOSE, STAT, LSEEK, BRK, GETPID, EXIT, UNAME)
@@ -41,7 +41,9 @@ The kernel is structured in modular layers with strict boundaries:
 |     - POSIX.1-2024 Errno & KernelResult<T>             |
 |     - Virtual File System (vfs::open/read/stat/ls)     |
 |     - Virtual Telemetry Filesystem (/proc)             |
+|     - Mount Table: / (initramfs), /mnt/sda1 (FAT32)    |
 |     - USTAR Initramfs Driver (libs/ustar at /)         |
+|     - Read-Only FAT32 Driver (libs/fat32 at /mnt/sda1) |
 |     - ELF64 Binary Loader (libs/elf-loader)            |
 |     - User FD Table (3..16) & sys_lseek offsets        |
 +--------------------------------------------------------+
@@ -99,7 +101,7 @@ The kernel is structured in modular layers with strict boundaries:
    - Maps and inspects SMBIOS / DMI firmware tables (Types 0, 1, 2) and enumerates all PCI/PCIe buses (`0..=255`);
    - Mounts the USTAR initramfs archive at `/` via `libs/ustar`;
    - Remaps the Dual 8259 PIC to vectors `32..47`, configures the PIT Channel 0 timer at 100 Hz, and initializes the PS/2 keyboard driver;
-   - Initializes the SATA AHCI controller, discovers attached drives, executes ATA `IDENTIFY DEVICE`, reads S.M.A.R.T. health data, reads LBA 0/1 to parse Protective MBR and GPT partitions via `libs/partition-table`;
+   - Initializes the SATA AHCI controller, discovers attached drives, executes ATA `IDENTIFY DEVICE`, reads S.M.A.R.T. health data, reads LBA 0/1 to parse Protective MBR and GPT partitions via `libs/partition-table`, and mounts FAT32 Partition 1 at `/mnt/sda1` via `libs/fat32`;
    - Allocates 4000 KiB from PMM for the Framebuffer backbuffer, enabling tear-free RAM double buffering;
    - Initializes the Fullscreen Classical Text Console (/dev/tty0 style, 160x50 at 1280x800);
    - Configures AMD64 Syscall MSRs (IA32_EFER, STAR, LSTAR, FMASK) and TSS dedicated kernel stack;

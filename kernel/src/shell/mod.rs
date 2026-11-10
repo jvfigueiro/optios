@@ -113,6 +113,13 @@ impl Shell {
                     self.cmd_cat(&args);
                 }
             }
+            "edit" => {
+                if vfs::open("/bin/edit").is_ok() {
+                    self.cmd_external(cmd, &args);
+                } else {
+                    self.println("edit: /bin/edit not found in VFS");
+                }
+            }
             "stat" => self.cmd_stat(&args),
             "lspci" => self.cmd_lspci(),
             "lsblk" => self.cmd_lsblk(),
@@ -136,6 +143,7 @@ impl Shell {
         self.println("  ver             - Alias for 'uname'");
         self.println("  ls [path]       - List files and directories in VFS (default: /)");
         self.println("  cat <path>      - Read and display file contents from VFS");
+        self.println("  edit <path>     - View and inspect file in Ring 3 text editor");
         self.println("  stat <path>     - Display POSIX metadata for a VFS node");
         self.println("  lspci           - Enumerate PCI/PCIe hardware inventory");
         self.println("  lsblk           - List AHCI disks and discovered MBR/GPT partitions");
@@ -150,7 +158,7 @@ impl Shell {
     }
 
     fn cmd_uname(&self, _args: &[&str]) {
-        self.println("OptiOS optios 1.0.0 Milestone 9 (PS/2 Mouse & Desktop Window Manager) x86_64 2026-11-10");
+        self.println("OptiOS optios 1.0.0 Milestone 10 (FAT32 VFS Mounts & Ring 3 Editor) x86_64 2026-11-10");
     }
 
     fn cmd_dmesg(&self) {

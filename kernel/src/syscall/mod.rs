@@ -55,6 +55,10 @@ static mut USER_FD_TABLE: [UserFileDescriptor; MAX_USER_FDS] = [UserFileDescript
     is_open: false,
 }; MAX_USER_FDS];
 
+static mut STDIN_PENDING: [u8; 16] = [0; 16];
+static mut STDIN_PENDING_LEN: usize = 0;
+static mut STDIN_PENDING_POS: usize = 0;
+
 /// Closes all active user file descriptors and resets the process file table.
 pub fn reset_user_fds() {
     unsafe {
@@ -64,6 +68,8 @@ pub fn reset_user_fds() {
                 USER_FD_TABLE[i].is_open = false;
             }
         }
+        STDIN_PENDING_LEN = 0;
+        STDIN_PENDING_POS = 0;
     }
 }
 
@@ -232,22 +238,96 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
         return -14; // -EFAULT
     }
 
+    if count == 0 {
+        return 0;
+    }
+
     if fd == 0 {
-        // Read from keyboard (stdin)
-        let mut bytes_read = 0;
-        while bytes_read < count {
-            if let Some(crate::drivers::keyboard::KeyEvent::Char(ch)) =
-                crate::drivers::keyboard::poll_key()
-            {
-                unsafe {
-                    *buf.add(bytes_read) = ch as u8;
+        // Unbuffered raw mode read from keyboard (stdin)
+        unsafe {
+            if STDIN_PENDING_POS < STDIN_PENDING_LEN {
+                let available = STDIN_PENDING_LEN - STDIN_PENDING_POS;
+                let to_copy = available.min(count);
+                for i in 0..to_copy {
+                    *buf.add(i) = STDIN_PENDING[STDIN_PENDING_POS + i];
                 }
-                bytes_read += 1;
-                break;
+                STDIN_PENDING_POS += to_copy;
+                if STDIN_PENDING_POS >= STDIN_PENDING_LEN {
+                    STDIN_PENDING_POS = 0;
+                    STDIN_PENDING_LEN = 0;
+                }
+                return to_copy as i64;
+            }
+        }
+
+        let mut seq_buf = [0u8; 8];
+        let mut seq_len = 0;
+        loop {
+            if let Some(key) = crate::drivers::keyboard::poll_key() {
+                match key {
+                    crate::drivers::keyboard::KeyEvent::Char(c) => {
+                        let mut tmp = [0u8; 4];
+                        let enc = c.encode_utf8(&mut tmp);
+                        let enc_bytes = enc.as_bytes();
+                        seq_buf[..enc_bytes.len()].copy_from_slice(enc_bytes);
+                        seq_len = enc_bytes.len();
+                    }
+                    crate::drivers::keyboard::KeyEvent::Enter => {
+                        seq_buf[0] = b'\n';
+                        seq_len = 1;
+                    }
+                    crate::drivers::keyboard::KeyEvent::Backspace => {
+                        seq_buf[0] = 0x08;
+                        seq_len = 1;
+                    }
+                    crate::drivers::keyboard::KeyEvent::Escape => {
+                        seq_buf[0] = 0x1b;
+                        seq_len = 1;
+                    }
+                    crate::drivers::keyboard::KeyEvent::Tab => {
+                        seq_buf[0] = b'\t';
+                        seq_len = 1;
+                    }
+                    crate::drivers::keyboard::KeyEvent::ArrowUp => {
+                        seq_buf[..3].copy_from_slice(b"\x1b[A");
+                        seq_len = 3;
+                    }
+                    crate::drivers::keyboard::KeyEvent::ArrowDown => {
+                        seq_buf[..3].copy_from_slice(b"\x1b[B");
+                        seq_len = 3;
+                    }
+                    crate::drivers::keyboard::KeyEvent::ArrowRight => {
+                        seq_buf[..3].copy_from_slice(b"\x1b[C");
+                        seq_len = 3;
+                    }
+                    crate::drivers::keyboard::KeyEvent::ArrowLeft => {
+                        seq_buf[..3].copy_from_slice(b"\x1b[D");
+                        seq_len = 3;
+                    }
+                    _ => {}
+                }
+                if seq_len > 0 {
+                    break;
+                }
             }
             core::hint::spin_loop();
         }
-        bytes_read as i64
+
+        let to_copy = seq_len.min(count);
+        unsafe {
+            for i in 0..to_copy {
+                *buf.add(i) = seq_buf[i];
+            }
+            if seq_len > to_copy {
+                let remaining = seq_len - to_copy;
+                for i in 0..remaining {
+                    STDIN_PENDING[i] = seq_buf[to_copy + i];
+                }
+                STDIN_PENDING_POS = 0;
+                STDIN_PENDING_LEN = remaining;
+            }
+        }
+        to_copy as i64
     } else {
         let fd_idx = fd as usize;
         if fd_idx < 3 || fd_idx >= MAX_USER_FDS {

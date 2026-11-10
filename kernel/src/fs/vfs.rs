@@ -1,21 +1,28 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
-// Item: POSIX Virtual File System (VFS) Core Interface
+// Item: POSIX Virtual File System (VFS) Core Interface & Mount Table
 // Date: 2026-11-10
 
 //! Virtual File System (VFS) interface providing POSIX-like `open`, `read`, `stat`, and `list_dir`
-//! primitives over the in-memory USTAR Initramfs mounted at `/`.
+//! primitives over the in-memory USTAR Initramfs mounted at `/`, virtual pseudo-filesystems (`/proc`),
+//! and block-device filesystems (FAT32 mounted at `/mnt/sda1`).
 
 extern crate alloc;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use optios_ahci_proto::BlockDevice;
+use optios_fat32::{Fat32Error, Fat32FileSystem, PartitionBlockDevice};
+
 use crate::fs::proc::{self, ProcFileType};
 use crate::fs::tarfs;
 use crate::posix::errno::{Errno, KernelResult};
 use crate::{info, warn};
 
+pub const FAT_FD_BASE: usize = 0x4000_0000;
 pub const PROC_FD_BASE: usize = 0x8000_0000;
 
 struct OpenProc {
@@ -33,6 +40,114 @@ static PROC_TABLE: ProcTable = ProcTable {
     procs: UnsafeCell::new(Vec::new()),
     lock: AtomicBool::new(false),
 };
+
+// ---------------------------------------------------------------------------
+// FAT32 Storage Mount Integration
+// ---------------------------------------------------------------------------
+
+pub struct KernelAhciDevice {
+    pub port: &'static crate::drivers::ahci::AhciPort,
+}
+
+impl BlockDevice for KernelAhciDevice {
+    fn read_sectors(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> Result<(), optios_ahci_proto::AhciError> {
+        unsafe { self.port.read_sectors(lba, count, buf) }
+    }
+
+    fn sector_size(&self) -> u32 {
+        512
+    }
+
+    fn total_sectors(&self) -> u64 {
+        self.port.total_sectors
+    }
+}
+
+type MountedFat32 = Fat32FileSystem<PartitionBlockDevice<KernelAhciDevice>>;
+
+struct FatFsMount {
+    fs: UnsafeCell<Option<MountedFat32>>,
+    lock: AtomicBool,
+}
+
+unsafe impl Sync for FatFsMount {}
+
+static FAT_FS: FatFsMount = FatFsMount {
+    fs: UnsafeCell::new(None),
+    lock: AtomicBool::new(false),
+};
+
+fn with_fat_fs<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut MountedFat32) -> R,
+{
+    while FAT_FS
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let fs_opt = unsafe { &mut *FAT_FS.fs.get() };
+    let res = fs_opt.as_mut().map(f);
+    FAT_FS.lock.store(false, Ordering::Release);
+    res
+}
+
+struct OpenFatFile {
+    path: String,
+    size: usize,
+}
+
+struct FatTable {
+    files: UnsafeCell<Vec<Option<OpenFatFile>>>,
+    lock: AtomicBool,
+}
+
+unsafe impl Sync for FatTable {}
+
+static FAT_TABLE: FatTable = FatTable {
+    files: UnsafeCell::new(Vec::new()),
+    lock: AtomicBool::new(false),
+};
+
+/// Mounts a FAT32 partition from an AHCI disk port onto the VFS namespace at `/mnt/sda1`.
+pub fn mount_fat32_sda1(
+    port: &'static crate::drivers::ahci::AhciPort,
+    start_lba: u64,
+    total_sectors: u64,
+) -> KernelResult<()> {
+    let dev = KernelAhciDevice { port };
+    let part = PartitionBlockDevice::new(dev, start_lba, total_sectors);
+    match Fat32FileSystem::new(part) {
+        Ok(fs) => {
+            while FAT_FS
+                .lock
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            unsafe {
+                *FAT_FS.fs.get() = Some(fs);
+            }
+            FAT_FS.lock.store(false, Ordering::Release);
+            info!(
+                "VFS: Mounted FAT32 filesystem on /dev/sda1 (start LBA {}, {} sectors) at '/mnt/sda1' (Read-Only).",
+                start_lba, total_sectors
+            );
+            Ok(())
+        }
+        Err(_) => {
+            warn!("VFS: Failed to mount FAT32 filesystem on /dev/sda1.");
+            Err(Errno::EIO)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VFS Core Types and Table
+// ---------------------------------------------------------------------------
 
 /// Type of a node in the Virtual File System.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +238,7 @@ pub fn init(archive_opt: Option<(&'static str, &'static [u8])>) -> usize {
 
 /// Opens a file by path in Read-Only mode and returns its descriptor index (`fd`).
 pub fn open(path: &str) -> KernelResult<usize> {
-    if path == "/proc" || path == "/proc/" {
+    if path == "/proc" || path == "/proc/" || path == "/mnt" || path == "/mnt/" || path == "/mnt/sda1" || path == "/mnt/sda1/" {
         return Err(Errno::EISDIR);
     }
 
@@ -156,6 +271,53 @@ pub fn open(path: &str) -> KernelResult<usize> {
         return Ok(PROC_FD_BASE + idx);
     }
 
+    if path.starts_with("/mnt/sda1/") {
+        let rel = &path["/mnt/sda1/".len()..];
+        let stat_res = with_fat_fs(|fs| fs.stat(rel));
+        match stat_res {
+            Some(Ok(entry)) => {
+                if entry.is_dir {
+                    return Err(Errno::EISDIR);
+                }
+                while FAT_TABLE
+                    .lock
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
+                    core::hint::spin_loop();
+                }
+                let files = unsafe { &mut *FAT_TABLE.files.get() };
+                let mut found_idx = None;
+                for (i, slot) in files.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        *slot = Some(OpenFatFile {
+                            path: String::from(rel),
+                            size: entry.size as usize,
+                        });
+                        found_idx = Some(i);
+                        break;
+                    }
+                }
+                let idx = match found_idx {
+                    Some(i) => i,
+                    None => {
+                        files.push(Some(OpenFatFile {
+                            path: String::from(rel),
+                            size: entry.size as usize,
+                        }));
+                        files.len() - 1
+                    }
+                };
+                FAT_TABLE.lock.store(false, Ordering::Release);
+                return Ok(FAT_FD_BASE + idx);
+            }
+            Some(Err(Fat32Error::NotFound)) => return Err(Errno::ENOENT),
+            Some(Err(Fat32Error::NotAFile)) => return Err(Errno::EISDIR),
+            Some(Err(_)) => return Err(Errno::EIO),
+            None => return Err(Errno::ENOENT),
+        }
+    }
+
     let canonical = tarfs::normalize_path("", path)?;
     with_vfs(|nodes| {
         for (idx, node) in nodes.iter().enumerate() {
@@ -186,6 +348,21 @@ pub fn close(fd: usize) -> KernelResult<()> {
             *slot = None;
         }
         PROC_TABLE.lock.store(false, Ordering::Release);
+        Ok(())
+    } else if fd >= FAT_FD_BASE {
+        let idx = fd - FAT_FD_BASE;
+        while FAT_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let files = unsafe { &mut *FAT_TABLE.files.get() };
+        if let Some(slot) = files.get_mut(idx) {
+            *slot = None;
+        }
+        FAT_TABLE.lock.store(false, Ordering::Release);
         Ok(())
     } else {
         Ok(())
@@ -221,6 +398,32 @@ pub fn read(fd: usize, offset: usize, buf: &mut [u8]) -> KernelResult<usize> {
         return res;
     }
 
+    if fd >= FAT_FD_BASE {
+        let idx = fd - FAT_FD_BASE;
+        while FAT_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let files = unsafe { &*FAT_TABLE.files.get() };
+        let file_path = files.get(idx).and_then(|opt| opt.as_ref()).map(|f| f.path.clone());
+        FAT_TABLE.lock.store(false, Ordering::Release);
+
+        let Some(rel_path) = file_path else {
+            return Err(Errno::EBADF);
+        };
+
+        let read_res = with_fat_fs(|fs| fs.read_file(&rel_path, offset, buf));
+        return match read_res {
+            Some(Ok(bytes_read)) => Ok(bytes_read),
+            Some(Err(Fat32Error::NotFound)) => Err(Errno::ENOENT),
+            Some(Err(_)) => Err(Errno::EIO),
+            None => Err(Errno::EIO),
+        };
+    }
+
     with_vfs(|nodes| {
         let node = nodes.get(fd).ok_or(Errno::EBADF)?;
         if node.file_type == FileType::Directory {
@@ -245,6 +448,44 @@ pub fn stat(path: &str) -> KernelResult<VfsStat> {
             size: 0,
             mode: 0o555,
         });
+    }
+
+    if path == "/mnt" || path == "/mnt/" {
+        return Ok(VfsStat {
+            path: String::from("/mnt"),
+            file_type: FileType::Directory,
+            size: 0,
+            mode: 0o755,
+        });
+    }
+
+    if path == "/mnt/sda1" || path == "/mnt/sda1/" {
+        return Ok(VfsStat {
+            path: String::from("/mnt/sda1"),
+            file_type: FileType::Directory,
+            size: 0,
+            mode: 0o755,
+        });
+    }
+
+    if path.starts_with("/mnt/sda1/") {
+        let rel = &path["/mnt/sda1/".len()..];
+        let stat_res = with_fat_fs(|fs| fs.stat(rel));
+        return match stat_res {
+            Some(Ok(entry)) => Ok(VfsStat {
+                path: String::from(path),
+                file_type: if entry.is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::RegularFile
+                },
+                size: entry.size as usize,
+                mode: if entry.is_dir { 0o755 } else { 0o644 },
+            }),
+            Some(Err(Fat32Error::NotFound)) => Err(Errno::ENOENT),
+            Some(Err(_)) => Err(Errno::EIO),
+            None => Err(Errno::ENOENT),
+        };
     }
 
     if let Some(proc_file) = ProcFileType::from_path(path) {
@@ -304,6 +545,65 @@ pub fn list_dir(dir_path: &str) -> KernelResult<Vec<VfsStat>> {
         return Ok(results);
     }
 
+    if dir_path == "/mnt" || dir_path == "/mnt/" {
+        return Ok(alloc::vec![VfsStat {
+            path: String::from("/mnt/sda1"),
+            file_type: FileType::Directory,
+            size: 0,
+            mode: 0o755,
+        }]);
+    }
+
+    if dir_path == "/mnt/sda1" || dir_path == "/mnt/sda1/" {
+        let res = with_fat_fs(|fs| fs.list_dir("/"));
+        return match res {
+            Some(Ok(entries)) => {
+                let mut list = Vec::new();
+                for entry in entries {
+                    list.push(VfsStat {
+                        path: format!("/mnt/sda1/{}", entry.name),
+                        file_type: if entry.is_dir {
+                            FileType::Directory
+                        } else {
+                            FileType::RegularFile
+                        },
+                        size: entry.size as usize,
+                        mode: if entry.is_dir { 0o755 } else { 0o644 },
+                    });
+                }
+                Ok(list)
+            }
+            Some(Err(_)) => Err(Errno::EIO),
+            None => Err(Errno::ENOENT),
+        };
+    }
+
+    if dir_path.starts_with("/mnt/sda1/") {
+        let rel = &dir_path["/mnt/sda1/".len()..];
+        let res = with_fat_fs(|fs| fs.list_dir(rel));
+        return match res {
+            Some(Ok(entries)) => {
+                let mut list = Vec::new();
+                for entry in entries {
+                    list.push(VfsStat {
+                        path: format!("{}/{}", dir_path.trim_end_matches('/'), entry.name),
+                        file_type: if entry.is_dir {
+                            FileType::Directory
+                        } else {
+                            FileType::RegularFile
+                        },
+                        size: entry.size as usize,
+                        mode: if entry.is_dir { 0o755 } else { 0o644 },
+                    });
+                }
+                Ok(list)
+            }
+            Some(Err(Fat32Error::NotFound)) => Err(Errno::ENOENT),
+            Some(Err(_)) => Err(Errno::EIO),
+            None => Err(Errno::ENOENT),
+        };
+    }
+
     let canonical = if dir_path == "/" {
         String::from("/")
     } else {
@@ -333,6 +633,12 @@ pub fn list_dir(dir_path: &str) -> KernelResult<Vec<VfsStat>> {
                 size: 0,
                 mode: 0o555,
             });
+            results.push(VfsStat {
+                path: String::from("/mnt"),
+                file_type: FileType::Directory,
+                size: 0,
+                mode: 0o755,
+            });
         }
         if results.is_empty() && canonical != "/" {
             return Err(Errno::ENOENT);
@@ -355,6 +661,19 @@ pub fn file_size(fd: usize) -> Option<usize> {
         let procs = unsafe { &*PROC_TABLE.procs.get() };
         let sz = procs.get(idx).and_then(|opt| opt.as_ref()).map(|p| p.content.len());
         PROC_TABLE.lock.store(false, Ordering::Release);
+        sz
+    } else if fd >= FAT_FD_BASE {
+        let idx = fd - FAT_FD_BASE;
+        while FAT_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let files = unsafe { &*FAT_TABLE.files.get() };
+        let sz = files.get(idx).and_then(|opt| opt.as_ref()).map(|f| f.size);
+        FAT_TABLE.lock.store(false, Ordering::Release);
         sz
     } else {
         with_vfs(|nodes| nodes.get(fd).map(|n| n.size))

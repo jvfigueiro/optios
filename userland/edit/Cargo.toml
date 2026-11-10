@@ -1,0 +1,14 @@
+[package]
+name = "optios-edit"
+version = "0.1.0"
+edition = "2021"
+authors = ["João Figueiró"]
+description = "Ring 3 Kilo-style text editor and inspector for OptiOS"
+license = "Proprietary"
+
+[[bin]]
+name = "optios-edit"
+path = "src/main.rs"
+
+[dependencies]
+optios-libc = { path = "../../libs/opti-libc" }

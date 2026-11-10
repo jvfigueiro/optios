@@ -7,10 +7,12 @@ members = [
     "libs/elf-loader",
     "libs/ansi-parser",
     "libs/opti-wm",
+    "libs/fat32",
     "libs/opti-libc",
     "userland/sysinfo",
     "userland/cat",
     "userland/optifetch",
+    "userland/edit",
 ]
 resolver = "2"
 

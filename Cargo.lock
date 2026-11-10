@@ -33,8 +33,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "optios-edit"
+version = "0.1.0"
+dependencies = [
+ "optios-libc",
+]
+
+[[package]]
 name = "optios-elf-loader"
 version = "0.1.0"
+
+[[package]]
+name = "optios-fat32"
+version = "0.1.0"
+dependencies = [
+ "optios-ahci-proto",
+]
 
 [[package]]
 name = "optios-kernel"
@@ -44,6 +58,7 @@ dependencies = [
  "optios-ahci-proto",
  "optios-ansi-parser",
  "optios-elf-loader",
+ "optios-fat32",
  "optios-partition-table",
  "optios-ustar",
  "optios-wm",

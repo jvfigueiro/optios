@@ -18,33 +18,35 @@ OptiOS is an independent, 64-bit operating system developed from scratch in Rust
 - `libs/elf-loader/`: Pure, hardened ELF64 binary parser and `PT_LOAD` segment validator.
 - `libs/ansi-parser/`: Pure, hardened `#![no_std]` ANSI/VT100 escape sequence parser.
 - `libs/opti-wm/`: Pure, hardened `#![no_std]` window geometry, z-order, and hit-testing engine.
+- `libs/fat32/`: Pure, hardened `#![no_std]` Read-Only FAT32 driver with LFN support and cluster chain traversal.
 - `libs/opti-libc/`: Pure `#![no_std]` userland standard library, syscall wrappers, and dynamic heap allocator (`sys_brk`).
-- `userland/`: Standalone unprivileged Ring 3 binaries (`/bin/sysinfo`, `/bin/cat`, `/bin/optifetch`).
+- `userland/`: Standalone unprivileged Ring 3 binaries (`/bin/sysinfo`, `/bin/cat`, `/bin/optifetch`, `/bin/edit`).
 - `scripts/`: Build, packaging, host testing, disk formatting, and QEMU execution scripts.
 - `docs/`: Technical architecture, locking, POSIX semantics, and Architectural Decision Records (ADRs).
 
-## Milestone 9 Capabilities
+## Milestone 10 Capabilities
 
+- **Read-Only FAT32 Filesystem Driver (`libs/fat32`):** Modular `#![no_std]` filesystem parser operating over generic `BlockDevice` abstractions. Supports BPB Sector 0 parsing, FAT1/FAT2 cluster chain traversal, 8.3 short name normalization, and multi-part Long File Name (LFN) UCS-2 decoding to UTF-8.
+- **Dynamic VFS Mountpoints & Storage Integration:** Mounts AHCI Port 0 Partition 1 (discovered via GPT table) at `/mnt/sda1` (Read-Only). Transparent routing in `vfs.rs` allows commands such as `ls /mnt/sda1` and `/bin/cat /mnt/sda1/recovery_log.txt` to seamlessly read customer partition data.
+- **Ring 3 Kilo-Style Text Inspector & Editor (`/bin/edit`):** Standalone unprivileged ELF64 Rust executable. Renders file contents in a 160x50 terminal view using ANSI escape sequences (`\x1b[2J`, `\x1b[H`), displays a high-contrast reverse-video status bar (`\x1b[7m`), and responds to arrow-key scrolling and clean exit on `Ctrl+Q` (`0x11`) or `'q'`.
+- **Keyboard Driver Raw Mode:** Unbuffered raw mode in `sys_read(0, buf, count)` delivering instant keypress capture for navigation arrows (`\x1b[A`..`\x1b[D`), control characters (`Ctrl+Q`), Enter, Backspace, and Escape.
 - **Desktop Window Manager & Compositor (`gui` / `desktop`):** On-demand graphical desktop launched from `opti-sh`. Features tear-free double-buffered compositing on the linear GOP framebuffer (1280x800x32bpp), top system bar, dock/taskbar, and floating windows with full drag-and-drop movement.
 - **PS/2 Auxiliary Device (Mouse) Driver (IRQ 12):** Intel 8042 controller communication, Compaq Status Byte configuration, and 3-byte packet decoding over IDT vector 44 with Dual 8259 PIC EOI management and screen boundary clamping.
-- **High-Contrast Hardware Cursor Sprite:** 12x19 pixel arrow cursor with a 1px black outline and bright white interior rendered on top of the composition.
 - **Four Native Diagnostic Mini Apps:**
   1. *Diagnostic Terminal (`opti-sh`):* Interactive shell session window inside the graphical desktop.
   2. *Hardware & SMBIOS Inspector:* CPU brand string, CPUID feature flags, motherboard/firmware details, and PCI inventory.
   3. *Storage & S.M.A.R.T. Manager:* SATA AHCI drives, GPT partition tables, and real-time S.M.A.R.T. health metrics.
   4. *Memory & PMM Monitor:* Graphical visual progress bars for physical PMM frame allocation and kernel virtual heap.
-- **Pure Window Geometry Engine (`libs/opti-wm`):** Modular `#![no_std]` library managing window z-ordering, hierarchical hit-testing (`TitleBar`, `CloseButton`, `Body`, `Desktop`), and boundary clamping.
-- **Terminal Cleanliness & UTF-8 Decoder:** Internal kernel logs route exclusively to COM1 serial and `dmesg` once the shell starts; 2-byte UTF-8 decoder maps `\xC3\xA3` -> `ã` and `\xC3\xB3` -> `ó` to accurately render `João Figueiró`.
 - **Pre-Allocated User Paging Structures (Zero Leaks):** Pre-allocates intermediate page tables (PDPT, PD, PT) during `syscall::init()`, ensuring exact physical frame parity (`delta = 0`, `zero leak: true`) from the very first process execution.
-- **POSIX Userland & ANSI Terminal:** Ring 3 unprivileged execution with dynamic `sys_brk` heap, System V AMD64 ABI `argc`/`argv` passing, `/proc` telemetry, and fastfetch clone `/bin/optifetch`.
+- **Hybrid RAW ISO Bootability:** The generated ISO (`build/optios.iso`) contains an embedded EFI system partition suitable for direct RAW flashing to physical USB thumb drives (`dd if=optios.iso of=/dev/sdX bs=4M status=progress`).
 
 ## Testing
 
 ### Host Unit Tests
 
-OptiOS separates pure protocol and parsing logic into host-testable library crates (`optios-ustar`, `optios-ahci-proto`, `optios-partition-table`, `optios-elf-loader`, `optios-ansi-parser`, and `optios-wm`).
+OptiOS separates pure protocol and parsing logic into host-testable library crates (`optios-ustar`, `optios-ahci-proto`, `optios-partition-table`, `optios-elf-loader`, `optios-ansi-parser`, `optios-wm`, and `optios-fat32`).
 
-To run host unit tests (62 tests):
+To run host unit tests (68 tests):
 
 ```bash
 ./scripts/test.sh
@@ -53,7 +55,7 @@ To run host unit tests (62 tests):
 Or invoke `cargo test` directly for library crates:
 
 ```bash
-cargo test -p optios-ustar -p optios-ahci-proto -p optios-partition-table -p optios-elf-loader -p optios-ansi-parser -p optios-wm --target x86_64-unknown-linux-gnu
+cargo test -p optios-ustar -p optios-ahci-proto -p optios-partition-table -p optios-elf-loader -p optios-ansi-parser -p optios-wm -p optios-fat32 --target x86_64-unknown-linux-gnu
 ```
 
 > **Note on Whole-Workspace `cargo test`:**

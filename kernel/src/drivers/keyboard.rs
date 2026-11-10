@@ -21,6 +21,7 @@ static READ_IDX: AtomicUsize = AtomicUsize::new(0);
 
 static SHIFT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static EXTENDED_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CTRL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// High-level decoded keyboard events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,12 +114,19 @@ pub fn poll_key() -> Option<KeyEvent> {
             if !is_extended && (released == 0x2A || released == 0x36) {
                 SHIFT_ACTIVE.store(false, Ordering::Relaxed);
             }
+            if released == 0x1D {
+                CTRL_ACTIVE.store(false, Ordering::Relaxed);
+            }
             continue;
         }
 
         // Handle extended key presses (0xE0 prefixed)
         if is_extended {
             match code {
+                0x1D => {
+                    CTRL_ACTIVE.store(true, Ordering::Relaxed);
+                    continue;
+                }
                 0x48 => return Some(KeyEvent::ArrowUp),
                 0x50 => return Some(KeyEvent::ArrowDown),
                 0x4B => return Some(KeyEvent::ArrowLeft),
@@ -129,6 +137,10 @@ pub fn poll_key() -> Option<KeyEvent> {
 
         // Handle standard Scan Code Set 1 key presses
         match code {
+            0x1D => {
+                CTRL_ACTIVE.store(true, Ordering::Relaxed);
+                continue;
+            }
             0x2A | 0x36 => {
                 SHIFT_ACTIVE.store(true, Ordering::Relaxed);
                 continue;
@@ -144,7 +156,12 @@ pub fn poll_key() -> Option<KeyEvent> {
             0x3F => return Some(KeyEvent::F5),
             _ => {
                 let shift = SHIFT_ACTIVE.load(Ordering::Relaxed);
+                let ctrl = CTRL_ACTIVE.load(Ordering::Relaxed);
                 if let Some(ch) = translate_ascii(code, shift) {
+                    if ctrl && ch.is_ascii_alphabetic() {
+                        let ctrl_char = ((ch.to_ascii_lowercase() as u8) - b'a' + 1) as char;
+                        return Some(KeyEvent::Char(ctrl_char));
+                    }
                     return Some(KeyEvent::Char(ch));
                 }
             }
