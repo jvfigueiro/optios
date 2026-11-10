@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["João Figueiró"]
 description = "Native OptiOS fastfetch system information utility in Ring 3"
-license = "Proprietary"
+license = "GPL-2.0-or-later"
 
 [dependencies]
 optios-libc = { path = "../../libs/opti-libc" }

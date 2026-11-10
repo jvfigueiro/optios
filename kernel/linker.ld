@@ -1,6 +1,6 @@
 /*
-// OptiOS
-// Copyright (C) 2026 João Figueiró. All rights reserved
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 João Figueiró
 // Item: Kernel ELF64 Higher-Half Linker Script
 // Date: 2026-11-09
 */

@@ -1,5 +1,5 @@
-// OptiOS
-// Copyright (C) 2026 João Figueiró. All rights reserved
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 João Figueiró
 // Item: Fullscreen Interactive Diagnostic Terminal (opti-sh)
 // Date: 2026-11-10
 
@@ -42,7 +42,7 @@ impl Shell {
     /// Initializes the shell terminal session with the MOTD and prompt.
     pub fn init_session(&self) {
         console::print_str("\nOptiOS 1.0\n");
-        console::print_str("Copyright (C) 2026 João Figueiró. All Rights Reserved.\n\n");
+        console::print_str("Copyright (C) 2026 João Figueiró\n\n");
         console::print_str(PROMPT);
     }
 

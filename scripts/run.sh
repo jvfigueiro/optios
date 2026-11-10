@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# OptiOS
-# Copyright (C) 2026 João Figueiró. All rights reserved
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 João Figueiró
 # Item: QEMU Q35 + OVMF Execution & Automated Milestone 10 Verification Script
 # Date: 2026-11-10
 

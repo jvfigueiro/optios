@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 authors = ["João Figueiró"]
 description = "Pure, #![no_std] userland runtime, syscall wrappers, and heap allocator for OptiOS"
-license = "Proprietary"
+license = "GPL-2.0-or-later"
 
 [dependencies]

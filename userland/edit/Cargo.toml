@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["João Figueiró"]
 description = "Ring 3 Kilo-style text editor and inspector for OptiOS"
-license = "Proprietary"
+license = "GPL-2.0-or-later"
 
 [[bin]]
 name = "optios-edit"

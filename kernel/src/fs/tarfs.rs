@@ -1,5 +1,5 @@
-// OptiOS
-// Copyright (C) 2026 João Figueiró. All rights reserved
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 João Figueiró
 // Item: POSIX.1-1988 USTAR Initramfs Archive Parser Adapter
 // Date: 2026-11-09
 

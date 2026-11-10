@@ -1,38 +1,27 @@
 <!--
-// OptiOS
-// Copyright (C) 2026 João Figueiró. All rights reserved
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 João Figueiró
 // Item: Third-Party Notices & Component Disclosures
-// Date: 2026-11-09
+// Date: 2026-11-10
 -->
 
 # Third-Party Notices & Component Disclosures
 
-This document lists third-party software components bundled, vendored, or distributed with OptiOS, along with their respective licensing notices.
+Owner to verify licensing statements with qualified counsel before any distribution.
+
+This document records third-party software components bundled, vendored, compiled into the kernel image, or used as host development tools with OptiOS, in compliance with the OptiOS Licensing Policy (`docs/licensing-policy.md`).
 
 ---
 
-## 1. OptiOS Project Licensing Notice
+## 1. Shipped / Bundled Components
 
-> **Important Notice:**
-> This repository and its distributed binaries contain proprietary or reserved components of OptiOS.
-> Every source code file, script, and linker descriptor contains the header:
-> ```text
-> Copyright (C) 2026 João Figueiró. All rights reserved.
-> ```
-> A copyright header indicates ownership and reservation of rights; **it does not constitute an open-source or permissive license grant**.
-> This document does **NOT** establish or define a software license for OptiOS itself; licensing and distribution terms for OptiOS remain the exclusive prerogative of the project maintainer.
-
----
-
-## 2. Third-Party Components
-
-### 2.1 Limine Bootloader (`vendor/limine`)
-
-- **Component:** Limine Bootloader (Binary EFI payloads, BIOS stages, and C header/installer utilities).
-- **Origin / Source:** [https://github.com/limine-bootloader/limine](https://github.com/limine-bootloader/limine)
-- **License:** 2-Clause BSD License ("Simplified BSD License" / "FreeBSD License")
-- **Copyright:** Copyright (C) 2019-2025 mintsuki and contributors.
-
+### 1.1 Limine Bootloader Binary Payloads (`vendor/limine/`)
+- **Component**: Limine Bootloader (Binary EFI payloads `BOOTX64.EFI`, `limine-uefi-cd.bin`, BIOS stages)
+- **Origin / Source**: [https://github.com/limine-bootloader/limine](https://github.com/limine-bootloader/limine)
+- **Version**: v8.x-binary branch
+- **SPDX-License-Identifier**: `BSD-2-Clause`
+- **Copyright**: Copyright (C) 2019-2025 mintsuki and contributors
+- **Notice**:
 ```text
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -58,11 +47,50 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ---
 
-### 2.2 PCI ID Database Subset (`/usr/share/hwdata/pci.ids`)
+### 1.2 PCI ID Database Subset (`initramfs:/usr/share/hwdata/pci.ids`)
+- **Component**: PCI ID Database (curated minimal subset of vendor and device IDs for Q35/ICH9 chipset and virtual hardware)
+- **Origin / Source**: [https://pci-ids.ucw.cz/](https://pci-ids.ucw.cz/)
+- **Maintainer**: Martin Mares, Albert Pool, and contributors
+- **SPDX-License-Identifier**: `BSD-3-Clause OR GPL-2.0-or-later`
+- **Selected Option**: `GPL-2.0-or-later` (compatible with OptiOS kernel image)
+- **Modifications**: Minimal 10-line text subset containing only devices enumerated during QEMU/Q35 live boot.
 
-- **Component:** PCI Hardware Identification Database (curated minimal subset embedded within the boot initramfs image).
-- **Origin / Source:** The PCI ID Repository ([https://pci-ids.ucw.cz/](https://pci-ids.ucw.cz/))
-- **Maintainer:** Martin Mares and contributors.
-- **License:** Dual-licensed under the 3-Clause BSD License and the GNU General Public License (GPL) version 2 or later.
-- **Notice Summary:**
-  The subset shipped in `initramfs.tar` includes vendor and device identification strings for common virtualized and physical chipset devices (Intel Q35 DRAM controller, ICH9 LPC/SATA/SMBus, Intel 82574L NIC, QEMU standard VGA).
+---
+
+### 1.3 Rust Crate Dependencies (via `cargo metadata`)
+
+#### `limine` (crate version 0.5.0)
+- **Component**: Limine boot protocol Rust interface structures
+- **Source**: [https://github.com/limine-bootloader/limine-rs](https://github.com/limine-bootloader/limine-rs)
+- **SPDX-License-Identifier**: `MIT OR Apache-2.0`
+- **Selected Option**: `MIT` (permissive, compatible with GPL-2.0-or-later)
+- **Local Modifications**: None (compiled via Cargo)
+
+#### `bitflags` (crate version 2.13.2)
+- **Component**: Bitmask flags macro and utility types (transitive dependency of limine)
+- **Source**: [https://github.com/bitflags/bitflags](https://github.com/bitflags/bitflags)
+- **SPDX-License-Identifier**: `MIT OR Apache-2.0`
+- **Selected Option**: `MIT` (permissive, compatible with GPL-2.0-or-later)
+- **Local Modifications**: None (compiled via Cargo)
+
+---
+
+## 2. Host Build & Verification Tools (NOT Shipped)
+
+The following tools are used strictly in the host development/test environment and are **not shipped** in the OptiOS binary kernel image or distribution medium:
+
+### 2.1 QEMU (`qemu-system-x86_64`)
+- **Purpose**: Virtual machine hardware emulation for Q35/OVMF automated testing.
+- **SPDX-License-Identifier**: `GPL-2.0-only` / `GPL-2.0-or-later`
+- **Distribution Status**: **Not shipped** (host development and CI tool only).
+
+### 2.2 OVMF (`OVMF.fd` / EDK II)
+- **Purpose**: Open-source UEFI firmware binary for QEMU testing.
+- **Origin**: Debian distribution of Tianocore EDK II.
+- **SPDX-License-Identifier**: `BSD-2-Clause-Patent`
+- **Distribution Status**: **Not shipped** (host development and test firmware only).
+
+### 2.3 xorriso
+- **Purpose**: Host utility to generate ISO 9660 filesystem images (`scripts/build.sh`).
+- **SPDX-License-Identifier**: `GPL-3.0-or-later`
+- **Distribution Status**: **Not shipped** (external host build tool only; never linked or included in kernel).

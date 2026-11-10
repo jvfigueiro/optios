@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 authors = ["João Figueiró"]
 description = "Pure, #![no_std] ANSI escape sequence parser for OptiOS terminal emulator"
-license = "Proprietary"
+license = "GPL-2.0-or-later"
 
 [dependencies]

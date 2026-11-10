@@ -1,5 +1,5 @@
-// OptiOS
-// Copyright (C) 2026 João Figueiró. All rights reserved
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 João Figueiró
 // Item: SMBIOS / DMI Firmware Table Parser (Types 0, 1, 2)
 // Date: 2026-11-10
 

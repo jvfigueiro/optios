@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# OptiOS
-# Copyright (C) 2026 João Figueiró. All rights reserved
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 João Figueiró
 # Item: Automated Host Test Runner for Library Crates
 # Date: 2026-11-10
 
@@ -8,6 +8,9 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${PROJECT_ROOT}"
+
+# 1. License compliance check
+"${PROJECT_ROOT}/scripts/license-check.sh"
 
 echo "=================================================================="
 echo " OptiOS Host Test Suite"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# OptiOS
-# Copyright (C) 2026 João Figueiró. All rights reserved
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 João Figueiró
 # Item: Raw PPM (P6) to PNG Screendump Converter
 # Date: 2026-11-09
 """Converts raw PPM (P6) images to PNG using Python standard library only."""

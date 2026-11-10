@@ -1,5 +1,5 @@
-// OptiOS
-// Copyright (C) 2026 João Figueiró. All rights reserved
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 João Figueiró
 // Item: x86-64 Port I/O Primitives (outb, inb, outw, inw, outl, inl, io_wait)
 // Date: 2026-11-09
 

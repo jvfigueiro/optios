@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# OptiOS
-# Copyright (C) 2026 João Figueiró. All rights reserved
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 João Figueiró
 # Item: Script to Generate a 64 MiB Disk Image with GPT Partition Table & FAT32 Volume
 # Date: 2026-11-10
 

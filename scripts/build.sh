@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# OptiOS
-# Copyright (C) 2026 João Figueiró. All rights reserved
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 João Figueiró
 # Item: Kernel Compilation, USTAR Initramfs Builder & UEFI ISO Packager
 # Date: 2026-11-10
 
@@ -87,7 +87,7 @@ EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/motd"
 OptiOS 1.0
-Copyright (C) 2026 João Figueiró. All Rights Reserved.
+Copyright (C) 2026 João Figueiró
 EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/usr/share/hwdata/pci.ids"
