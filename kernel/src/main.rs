@@ -1,10 +1,10 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Kernel Main Entry Point (_start) & Multi-Tab Interactive Diagnostic UI
-// Date: 2026-11-09
+// Date: 2026-11-10
 
-//! OptiOS Kernel Main Entry Point (_start) — Milestone 5:
-//! POSIX Foundation, USTAR Initramfs VFS, Read-Only SATA AHCI Driver & 4-Tab Dashboard.
+//! OptiOS Kernel Main Entry Point (_start) — Milestone 6:
+//! Storage (LBA48 Sector Reads, Partitions MBR/GPT, S.M.A.R.T.), RAM Double Buffering & Interactive Shell (opti-sh).
 
 #![no_std]
 #![no_main]
@@ -19,6 +19,7 @@ mod fs;
 mod logger;
 mod mm;
 mod posix;
+pub mod shell;
 pub mod time;
 
 use alloc::string::String;
@@ -49,6 +50,7 @@ enum DashboardTab {
     PciInventory = 2,
     MemoryAndHeap = 3,
     StorageAndVfs = 4,
+    InteractiveShell = 5,
 }
 
 impl DashboardTab {
@@ -57,16 +59,18 @@ impl DashboardTab {
             Self::SystemAndSmbios => Self::PciInventory,
             Self::PciInventory => Self::MemoryAndHeap,
             Self::MemoryAndHeap => Self::StorageAndVfs,
-            Self::StorageAndVfs => Self::SystemAndSmbios,
+            Self::StorageAndVfs => Self::InteractiveShell,
+            Self::InteractiveShell => Self::SystemAndSmbios,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::SystemAndSmbios => Self::StorageAndVfs,
+            Self::SystemAndSmbios => Self::InteractiveShell,
             Self::PciInventory => Self::SystemAndSmbios,
             Self::MemoryAndHeap => Self::PciInventory,
             Self::StorageAndVfs => Self::MemoryAndHeap,
+            Self::InteractiveShell => Self::StorageAndVfs,
         }
     }
 
@@ -75,7 +79,8 @@ impl DashboardTab {
             Self::SystemAndSmbios => "System & SMBIOS",
             Self::PciInventory => "PCI Hardware Inventory",
             Self::MemoryAndHeap => "Memory Map & Heap Telemetry",
-            Self::StorageAndVfs => "Storage (AHCI) & VFS (Initramfs)",
+            Self::StorageAndVfs => "Storage, Partitions & S.M.A.R.T.",
+            Self::InteractiveShell => "Interactive Diagnostic Shell",
         }
     }
 }
@@ -199,6 +204,7 @@ fn render_dashboard(
     ahci_info: &AhciControllerInfo,
     vfs_entries: &[VfsStat],
     optios_release_content: &str,
+    shell: &shell::Shell,
     ticks: u64,
 ) {
     let bg_color = 0x000f172a;
@@ -218,25 +224,26 @@ fn render_dashboard(
     // Render Tab Navigation Bar right below header (y = 58..92)
     let nav_y = 58;
     let tabs = [
-        (DashboardTab::SystemAndSmbios, "[1 / F1] System & SMBIOS"),
-        (DashboardTab::PciInventory, "[2 / F2] PCI Hardware Inventory"),
-        (DashboardTab::MemoryAndHeap, "[3 / F3] Memory Map & Heap"),
-        (DashboardTab::StorageAndVfs, "[4 / F4] Storage (AHCI) & VFS"),
+        (DashboardTab::SystemAndSmbios, "[1 / F1] System"),
+        (DashboardTab::PciInventory, "[2 / F2] PCI Inventory"),
+        (DashboardTab::MemoryAndHeap, "[3 / F3] Memory & Heap"),
+        (DashboardTab::StorageAndVfs, "[4 / F4] Storage & SMART"),
+        (DashboardTab::InteractiveShell, "[5 / F5] Shell (opti-sh)"),
     ];
 
     let mut tab_x = 36;
     for (tab, label) in tabs {
         let is_active = tab == active_tab;
-        let tab_w = (label.len() * 8) + 28;
+        let tab_w = (label.len() * 8) + 24;
         let tab_bg = if is_active { accent_color } else { 0x001e293b };
         let tab_fg = if is_active { text_white } else { text_dim };
         let tab_border = if is_active { text_cyan } else { border_color };
 
         fb.fill_rect(tab_x, nav_y, tab_w, 32, tab_bg);
         fb.draw_rect_border(tab_x, nav_y, tab_w, 32, 1, tab_border);
-        fb.draw_string(tab_x + 14, nav_y + 8, label, tab_fg, Some(tab_bg));
+        fb.draw_string(tab_x + 12, nav_y + 8, label, tab_fg, Some(tab_bg));
 
-        tab_x += tab_w + 12;
+        tab_x += tab_w + 10;
     }
 
     let box_x = 36;
@@ -637,21 +644,21 @@ fn render_dashboard(
         }
 
         DashboardTab::StorageAndVfs => {
-            // Top Card: SATA AHCI 1.0 Controller & Disk Inventory (Read-Only + S.M.A.R.T.)
+            // Top Card: SATA AHCI 1.0 Controller, S.M.A.R.T. & Discovered Partition Tables
             let ahci_y = 104;
-            let ahci_h = 250;
+            let ahci_h = 254;
             fb.fill_rect(box_x, ahci_y, box_w, ahci_h, card_bg);
             fb.draw_rect_border(box_x, ahci_y, box_w, ahci_h, 2, border_color);
 
             fb.draw_string(
                 box_x + 20,
-                ahci_y + 18,
-                "[ SATA AHCI 1.0 STORAGE CONTROLLER & S.M.A.R.T. DISK TELEMETRY (READ-ONLY) ]",
+                ahci_y + 16,
+                "[ SATA AHCI 1.0 CONTROLLER, S.M.A.R.T. TELEMETRY & DISCOVERED PARTITIONS ]",
                 accent_color,
                 None,
             );
 
-            let ay = ahci_y + 46;
+            let ay = ahci_y + 42;
             fb.draw_string(box_x + 20, ay, "AHCI HBA Status:", text_dim, None);
             if ahci_info.present {
                 let mut b_bus = [0u8; 2];
@@ -697,7 +704,7 @@ fn render_dashboard(
                 fb.draw_string(box_x + 180, ay, "No AHCI 1.0 controller detected", text_yellow, None);
             }
 
-            let dth_y = ahci_y + 80;
+            let dth_y = ahci_y + 70;
             fb.draw_string(box_x + 20, dth_y, "PORT", text_dim, None);
             fb.draw_string(box_x + 80, dth_y, "MODEL NUMBER", text_dim, None);
             fb.draw_string(box_x + 310, dth_y, "SERIAL NUMBER", text_dim, None);
@@ -706,7 +713,7 @@ fn render_dashboard(
             fb.draw_string(box_x + 860, dth_y, "S.M.A.R.T. STATUS", text_dim, None);
             fb.fill_rect(box_x + 20, dth_y + 18, box_w - 40, 1, border_color);
 
-            let mut dry = dth_y + 26;
+            let mut dry = dth_y + 24;
             for drv in ahci_info.drives.iter() {
                 let mut b_p = [0u8; 20];
                 let mut b_sec = [0u8; 20];
@@ -736,15 +743,75 @@ fn render_dashboard(
                     _ => "Not Supported",
                 };
                 fb.draw_string(box_x + 860, dry, smart_str, text_green, None);
-                dry += 24;
+                dry += 22;
+
+                // S.M.A.R.T. Telemetry Sub-line
+                if let Some(ref tel) = drv.smart_telemetry {
+                    let mut b_temp = [0u8; 20];
+                    let mut b_poh = [0u8; 20];
+                    let mut b_cyc = [0u8; 20];
+                    let mut b_real = [0u8; 20];
+                    let s_temp = tel.temperature_c.map(|t| u64_to_str(t as u64, &mut b_temp)).unwrap_or("N/A");
+                    let s_poh = tel.power_on_hours.map(|h| u64_to_str(h, &mut b_poh)).unwrap_or("N/A");
+                    let s_cyc = tel.power_cycles.map(|c| u64_to_str(c, &mut b_cyc)).unwrap_or("N/A");
+                    let s_real = tel.reallocated_sectors.map(|r| u64_to_str(r, &mut b_real)).unwrap_or("0");
+
+                    let mut sx = box_x + 80;
+                    fb.draw_string(sx, dry, "Telemetry: ", text_cyan, None);
+                    sx += 11 * 8;
+                    fb.draw_string(sx, dry, "Temp: ", text_dim, None);
+                    sx += 6 * 8;
+                    fb.draw_string(sx, dry, s_temp, text_yellow, None);
+                    sx += s_temp.len() * 8;
+                    fb.draw_string(sx, dry, " C | POH: ", text_dim, None);
+                    sx += 10 * 8;
+                    fb.draw_string(sx, dry, s_poh, text_white, None);
+                    sx += s_poh.len() * 8;
+                    fb.draw_string(sx, dry, " hrs | Cycles: ", text_dim, None);
+                    sx += 15 * 8;
+                    fb.draw_string(sx, dry, s_cyc, text_white, None);
+                    sx += s_cyc.len() * 8;
+                    fb.draw_string(sx, dry, " | Realloc: ", text_dim, None);
+                    sx += 12 * 8;
+                    fb.draw_string(sx, dry, s_real, text_green, None);
+                    dry += 22;
+                }
+
+                // Partition Table Sub-line
+                if !drv.partitions.is_empty() {
+                    let mut px = box_x + 80;
+                    fb.draw_string(px, dry, "Partitions: ", text_cyan, None);
+                    px += 12 * 8;
+                    for part in &drv.partitions {
+                        let mut b_sz = [0u8; 20];
+                        let s_sz = u64_to_str(part.size_mib, &mut b_sz);
+                        fb.draw_string(px, dry, "[p", text_dim, None);
+                        px += 2 * 8;
+                        let mut b_idx = [0u8; 20];
+                        let s_idx = u64_to_str(part.index as u64, &mut b_idx);
+                        fb.draw_string(px, dry, s_idx, text_yellow, None);
+                        px += s_idx.len() * 8;
+                        fb.draw_string(px, dry, "] '", text_dim, None);
+                        px += 3 * 8;
+                        fb.draw_string(px, dry, part.name.as_str(), text_white, None);
+                        px += part.name.len() * 8;
+                        fb.draw_string(px, dry, "' (", text_dim, None);
+                        px += 3 * 8;
+                        fb.draw_string(px, dry, s_sz, text_green, None);
+                        px += s_sz.len() * 8;
+                        fb.draw_string(px, dry, " MiB)  ", text_dim, None);
+                        px += 7 * 8;
+                    }
+                    dry += 22;
+                }
             }
 
             if ahci_info.atapi_ports_count > 0 {
                 let mut b_atapi = [0u8; 20];
                 let s_atapi = u64_to_str(ahci_info.atapi_ports_count as u64, &mut b_atapi);
-                fb.draw_string(box_x + 20, dry + 6, "SATAPI Optical Drives Active: ", text_dim, None);
-                fb.draw_string(box_x + 260, dry + 6, s_atapi, text_cyan, None);
-                fb.draw_string(box_x + 280, dry + 6, "(UEFI Boot ISO Media | Write-Protected)", text_dim, None);
+                fb.draw_string(box_x + 20, dry + 4, "SATAPI Optical Drives Active: ", text_dim, None);
+                fb.draw_string(box_x + 260, dry + 4, s_atapi, text_cyan, None);
+                fb.draw_string(box_x + 280, dry + 4, "(UEFI Boot ISO Media | Write-Protected)", text_dim, None);
             }
 
             // Bottom Card: POSIX Virtual File System (/) & USTAR Initramfs Inspection
@@ -806,22 +873,29 @@ fn render_dashboard(
                 l_y += 22;
             }
         }
+
+        DashboardTab::InteractiveShell => {
+            shell.render(fb, box_x, 104, box_w, (fb.height.saturating_sub(150)).min(638));
+        }
     }
 
     // Bottom Navigation & Status Bar
     let status_y = fb.height.saturating_sub(38);
     fb.fill_rect(0, status_y, fb.width, 38, banner_bg);
     fb.fill_rect(0, status_y, fb.width, 2, border_color);
-    fb.draw_string(
-        24,
-        status_y + 12,
-        "OptiOS v0.5.0-alpha  |  Keys: [1/F1] System  [2/F2] PCI  [3/F3] Memory  [4/F4] Storage & VFS  [Tab/Arrows] Cycle",
-        text_white,
-        Some(banner_bg),
-    );
 
-    // Update top-right clock
+    let mut sx = 24;
+    fb.draw_string(sx, status_y + 12, "[1..5 / F1..F5] Select Tabs", text_yellow, Some(banner_bg));
+    sx += 29 * 8;
+    fb.draw_string(sx, status_y + 12, " | [Tab/Arrows] Cycle", text_dim, Some(banner_bg));
+    sx += 21 * 8;
+    fb.draw_string(sx, status_y + 12, " | [F5] Terminal Shell (opti-sh)", text_green, Some(banner_bg));
+    sx += 32 * 8;
+    fb.draw_string(sx, status_y + 12, " | Storage: Read-Only (Forensic Safe)", text_cyan, Some(banner_bg));
+
+    // Update top-right clock and flush to physical screen
     render_header_clock(fb, ticks);
+    fb.present();
 }
 
 /// Main entry point invoked by the Limine bootloader in 64-bit Long Mode.
@@ -833,7 +907,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     info!("========================================================");
-    info!("OptiOS Kernel — Milestone 5: POSIX VFS, Initramfs & SATA AHCI");
+    info!("OptiOS Kernel — Milestone 6: Storage DMA, Partitions, Double Buffering & Interactive Shell");
     info!("========================================================");
 
     // 2. Validate bootloader base protocol compliance
@@ -1095,17 +1169,55 @@ pub extern "C" fn _start() -> ! {
                 if pass_satapi { "PASS" } else { "FAIL" }
             );
         }
+
+        // 3. Milestone 6 Selftest: Sector DMA reading & SMART read
+        if let Some(port0) = ahci::get_port(0) {
+            let mut sec0 = [0u8; 512];
+            let read0_ok = unsafe { port0.read_sectors(0, 1, &mut sec0).is_ok() };
+            let mbr_ok = read0_ok && sec0[510] == 0x55 && sec0[511] == 0xAA;
+
+            let mut sec1 = [0u8; 512];
+            let read1_ok = unsafe { port0.read_sectors(1, 1, &mut sec1).is_ok() };
+            let gpt_ok = read1_ok && &sec1[..8] == b"EFI PART";
+
+            let smart_res = unsafe { port0.read_smart_data() };
+            let smart_ok = smart_res.is_ok();
+
+            info!(
+                "AHCI Selftest: Port 0 READ DMA EXT (LBA 0 MBR sig 0x55AA) -> {}",
+                if mbr_ok { "PASS" } else { "FAIL" }
+            );
+            info!(
+                "AHCI Selftest: Port 0 READ DMA EXT (LBA 1 GPT sig 'EFI PART') -> {}",
+                if gpt_ok { "PASS" } else { "FAIL" }
+            );
+            info!(
+                "AHCI Selftest: Port 0 SMART READ DATA (0xB0 / 0xD0) -> {}",
+                if smart_ok { "PASS" } else { "FAIL" }
+            );
+        }
     }
 
-    // 17. Render initial Milestone 5 interactive dashboard on the Framebuffer
+    // 17. Render initial Milestone 6 interactive dashboard on the Framebuffer
     let mut active_tab = DashboardTab::SystemAndSmbios;
     let mut fb_driver_opt = raw_fb_opt.as_ref().map(FramebufferDriver::from_limine);
+    let mut shell = shell::Shell::new();
 
     if let Some(ref mut fb) = fb_driver_opt {
         info!(
             "Framebuffer active: {}x{} ({} bpp, pitch: {} bytes)",
             fb.width, fb.height, fb.bpp, fb.pitch
         );
+
+        if let Err(e) = fb.enable_double_buffering() {
+            warn!("Framebuffer: Could not enable RAM double buffering: {}", e);
+        } else {
+            info!(
+                "Framebuffer: RAM Double Buffering enabled ({} KiB allocated at 0x{:016x}).",
+                (fb.pitch * fb.height) / 1024,
+                drivers::video::framebuffer::BACKBUFFER_VIRT_BASE
+            );
+        }
 
         let bg_color = 0x000f172a;
         let banner_bg = 0x001e293b;
@@ -1139,10 +1251,11 @@ pub extern "C" fn _start() -> ! {
             &ahci_info,
             &vfs_entries,
             &optios_release_content,
+            &shell,
             pit::ticks(),
         );
 
-        info!("Milestone 5 interactive dashboard rendered successfully on Framebuffer.");
+        info!("Milestone 6 interactive dashboard rendered successfully on Framebuffer.");
     } else {
         warn!("No graphical framebuffer available!");
     }
@@ -1169,18 +1282,38 @@ pub extern "C" fn _start() -> ! {
 
         // Process all pending keyboard events from the lock-free ring buffer
         let mut tab_changed = false;
-        while let Some(key) = keyboard::poll_key() {
-            let new_tab = match key {
-                KeyEvent::Char('1') | KeyEvent::F1 => Some(DashboardTab::SystemAndSmbios),
-                KeyEvent::Char('2') | KeyEvent::F2 => Some(DashboardTab::PciInventory),
-                KeyEvent::Char('3') | KeyEvent::F3 => Some(DashboardTab::MemoryAndHeap),
-                KeyEvent::Char('4') | KeyEvent::F4 => Some(DashboardTab::StorageAndVfs),
-                KeyEvent::Tab | KeyEvent::ArrowRight => Some(active_tab.next()),
-                KeyEvent::ArrowLeft => Some(active_tab.prev()),
-                _ => None,
-            };
+        let mut shell_updated = false;
 
-            if let Some(target_tab) = new_tab {
+        while let Some(key) = keyboard::poll_key() {
+            let mut switched = None;
+            match key {
+                KeyEvent::F1 => switched = Some(DashboardTab::SystemAndSmbios),
+                KeyEvent::F2 => switched = Some(DashboardTab::PciInventory),
+                KeyEvent::F3 => switched = Some(DashboardTab::MemoryAndHeap),
+                KeyEvent::F4 => switched = Some(DashboardTab::StorageAndVfs),
+                KeyEvent::F5 => switched = Some(DashboardTab::InteractiveShell),
+                _ => {}
+            }
+
+            if active_tab != DashboardTab::InteractiveShell {
+                match key {
+                    KeyEvent::Char('1') => switched = Some(DashboardTab::SystemAndSmbios),
+                    KeyEvent::Char('2') => switched = Some(DashboardTab::PciInventory),
+                    KeyEvent::Char('3') => switched = Some(DashboardTab::MemoryAndHeap),
+                    KeyEvent::Char('4') => switched = Some(DashboardTab::StorageAndVfs),
+                    KeyEvent::Char('5') => switched = Some(DashboardTab::InteractiveShell),
+                    KeyEvent::Tab | KeyEvent::ArrowRight => switched = Some(active_tab.next()),
+                    KeyEvent::ArrowLeft => switched = Some(active_tab.prev()),
+                    _ => {}
+                }
+            } else {
+                if switched.is_none() {
+                    shell.handle_key(key);
+                    shell_updated = true;
+                }
+            }
+
+            if let Some(target_tab) = switched {
                 if target_tab != active_tab {
                     active_tab = target_tab;
                     tab_changed = true;
@@ -1193,9 +1326,9 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Update UI if the active tab changed or 0.1s (10 ticks) elapsed
+        // Update UI if the active tab changed, shell received input, or 0.1s (10 ticks) elapsed
         let current_tenth = current_ticks / 10;
-        if tab_changed {
+        if tab_changed || shell_updated {
             if let Some(ref mut fb) = fb_driver_opt {
                 render_dashboard(
                     fb,
@@ -1213,6 +1346,7 @@ pub extern "C" fn _start() -> ! {
                     &ahci_info,
                     &vfs_entries,
                     &optios_release_content,
+                    &shell,
                     current_ticks,
                 );
             }

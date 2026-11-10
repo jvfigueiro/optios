@@ -1,10 +1,10 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: AHCI Protocol Pure Data Structures & Builders
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Pure, `#![no_std]` AHCI 1.0/1.3 protocol structures, bitfield builders,
-//! and ATA IDENTIFY DEVICE decoder for OptiOS.
+//! ATA IDENTIFY DEVICE decoder, S.M.A.R.T. telemetry parser, and BlockDevice trait for OptiOS.
 
 #![no_std]
 
@@ -16,11 +16,13 @@ pub const FIS_TYPE_REG_H2D: u8 = 0x27;
 
 /// Enumeration of permissible ATA commands.
 /// OptiOS enforces storage read-only safety by construction:
-/// only read/diagnostic commands can be represented.
+/// only read and diagnostic commands can be represented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AllowedCommand {
     IdentifyDevice = 0xEC,
+    ReadDmaExt = 0x25,
+    SmartReadData = 0xB0,
 }
 
 /// Errors returned by AHCI protocol operations.
@@ -53,7 +55,37 @@ pub struct IdentifiedDisk {
     pub smart_enabled: bool,
 }
 
-/// Builds a 20-byte Host-to-Device (H2D) Register FIS.
+/// Parsed S.M.A.R.T. single attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmartAttribute {
+    pub id: u8,
+    pub current: u8,
+    pub worst: u8,
+    pub raw: u64,
+}
+
+/// Extracted vital S.M.A.R.T. telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmartTelemetry {
+    pub revision: u16,
+    pub temperature_c: Option<u32>,
+    pub power_on_hours: Option<u64>,
+    pub power_cycles: Option<u64>,
+    pub reallocated_sectors: Option<u64>,
+    pub attributes: Vec<SmartAttribute>,
+}
+
+/// Abstract block storage device reading interface.
+pub trait BlockDevice {
+    /// Read consecutive sectors starting at `lba` into `buf`.
+    fn read_sectors(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> Result<(), AhciError>;
+    /// Logical sector size in bytes (e.g. 512).
+    fn sector_size(&self) -> u32;
+    /// Total addressable LBA sectors.
+    fn total_sectors(&self) -> u64;
+}
+
+/// Builds a 20-byte Host-to-Device (H2D) Register FIS for ATA IDENTIFY DEVICE.
 pub fn build_h2d_register_fis(cmd: AllowedCommand, out: &mut [u8]) -> Result<(), AhciError> {
     if out.len() < 20 {
         return Err(AhciError::BufferTooSmall);
@@ -63,6 +95,51 @@ pub fn build_h2d_register_fis(cmd: AllowedCommand, out: &mut [u8]) -> Result<(),
     out[1] = 0x80; // C bit set (command update)
     out[2] = cmd as u8;
     out[7] = 0x00; // Device register
+    Ok(())
+}
+
+/// Builds a 20-byte Host-to-Device (H2D) Register FIS for ATA READ DMA EXT (0x25, LBA48).
+pub fn build_read_dma_ext_fis(
+    lba: u64,
+    sector_count: u16,
+    out: &mut [u8],
+) -> Result<(), AhciError> {
+    if out.len() < 20 {
+        return Err(AhciError::BufferTooSmall);
+    }
+    out[..20].fill(0);
+    out[0] = FIS_TYPE_REG_H2D;
+    out[1] = 0x80; // C bit set (command)
+    out[2] = AllowedCommand::ReadDmaExt as u8;
+    out[3] = 0x00; // Features Low
+    out[4] = (lba & 0xFF) as u8;
+    out[5] = ((lba >> 8) & 0xFF) as u8;
+    out[6] = ((lba >> 16) & 0xFF) as u8;
+    out[7] = 0x40; // Device: LBA bit 6 set
+    out[8] = ((lba >> 24) & 0xFF) as u8;
+    out[9] = ((lba >> 32) & 0xFF) as u8;
+    out[10] = ((lba >> 40) & 0xFF) as u8;
+    out[11] = 0x00; // Features Exp
+    out[12] = (sector_count & 0xFF) as u8;
+    out[13] = ((sector_count >> 8) & 0xFF) as u8;
+    Ok(())
+}
+
+/// Builds a 20-byte Host-to-Device (H2D) Register FIS for ATA SMART READ DATA (0xB0 / 0xD0).
+pub fn build_smart_read_data_fis(out: &mut [u8]) -> Result<(), AhciError> {
+    if out.len() < 20 {
+        return Err(AhciError::BufferTooSmall);
+    }
+    out[..20].fill(0);
+    out[0] = FIS_TYPE_REG_H2D;
+    out[1] = 0x80; // C bit set (command)
+    out[2] = AllowedCommand::SmartReadData as u8; // 0xB0
+    out[3] = 0xD0; // Feature: SMART READ DATA
+    out[4] = 0x00; // LBA Low
+    out[5] = 0x4F; // LBA Mid constant
+    out[6] = 0xC2; // LBA High constant
+    out[7] = 0x00; // Device register
+    out[12] = 0x01; // Sector Count: 1
     Ok(())
 }
 
@@ -186,6 +263,61 @@ pub fn decode_identify_data(words: &[u16; 256]) -> IdentifiedDisk {
         capacity_mib,
         smart_supported,
         smart_enabled,
+    }
+}
+
+/// Decodes the 512-byte payload returned by ATA `SMART READ DATA` (`0xB0` / `0xD0`).
+pub fn parse_smart_data(data: &[u8; 512]) -> SmartTelemetry {
+    let revision = (data[0] as u16) | ((data[1] as u16) << 8);
+    let mut temp = None;
+    let mut poh = None;
+    let mut cycles = None;
+    let mut realloc = None;
+    let mut attrs = Vec::new();
+
+    for i in 0..30 {
+        let off = 2 + i * 12;
+        let id = data[off];
+        if id == 0 {
+            continue;
+        }
+        let current = data[off + 3];
+        let worst = data[off + 4];
+        let raw = (data[off + 5] as u64)
+            | ((data[off + 6] as u64) << 8)
+            | ((data[off + 7] as u64) << 16)
+            | ((data[off + 8] as u64) << 24)
+            | ((data[off + 9] as u64) << 32)
+            | ((data[off + 10] as u64) << 40);
+
+        attrs.push(SmartAttribute {
+            id,
+            current,
+            worst,
+            raw,
+        });
+
+        match id {
+            5 => realloc = Some(raw),
+            9 => poh = Some(raw),
+            12 => cycles = Some(raw),
+            190 | 194 => {
+                let t = (raw & 0xFF) as u32;
+                if t > 0 && t < 150 {
+                    temp = Some(t);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    SmartTelemetry {
+        revision,
+        temperature_c: temp,
+        power_on_hours: poh,
+        power_cycles: cycles,
+        reallocated_sectors: realloc,
+        attributes: attrs,
     }
 }
 

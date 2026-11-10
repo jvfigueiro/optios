@@ -3,6 +3,7 @@ members = [
     "kernel",
     "libs/ustar",
     "libs/ahci-proto",
+    "libs/partition-table",
 ]
 resolver = "2"
 

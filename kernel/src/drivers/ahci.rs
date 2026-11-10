@@ -1,19 +1,22 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
-// Item: SATA AHCI 1.0/1.3 Read-Only Storage Driver
-// Date: 2026-11-09
+// Item: SATA AHCI 1.0/1.3 Read-Only Storage Driver & Sector DMA Engine
+// Date: 2026-11-10
 
 //! SATA AHCI 1.0/1.3 Read-Only Storage Driver for OptiOS.
 //!
-//! Provides robust, hardware-validated SATA drive inspection and ATA `IDENTIFY DEVICE`
-//! interrogation with:
+//! Provides robust, hardware-validated SATA drive inspection, ATA `IDENTIFY DEVICE`,
+//! ATA `READ DMA EXT` (LBA48), and ATA `SMART READ DATA` interrogation with:
 //! - Strict Read-Only guarantees by construction (`AllowedCommand` enum)
+//! - Physical memory safety: sector reads chunked to max 8 sectors (4 KiB) per DMA transaction
 //! - BAR5 validation, 64-bit BAR rejection on Type-0 PCI headers, and sizing
 //! - BIOS/OS handoff (BOHC) synchronization
 //! - Time-based bounded polling using PIT (no CPU-speed-dependent spin loops)
-//! - Persistent per-port DMA frames holding Command List, Received FIS, Command Table, and Buffer
+//! - Dedicated per-port DMA frames holding Command List, Received FIS, Command Table, and 4 KiB Data Buffer
 //! - Dynamic slot selection via `NCS` and free-slot bitmask
 //! - Automatic engine recovery on command abort or task file error
+//! - MBR/GPT partition scanning via `optios-partition-table`
+//! - `BlockDevice` trait implementation
 
 extern crate alloc;
 use alloc::string::String;
@@ -22,9 +25,11 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{compiler_fence, AtomicBool, Ordering};
 
 use optios_ahci_proto::{
-    build_command_header, build_h2d_register_fis, build_prdt_entry, decode_identify_data,
-    find_free_slot, AhciError, AllowedCommand,
+    build_command_header, build_h2d_register_fis, build_prdt_entry, build_read_dma_ext_fis,
+    build_smart_read_data_fis, decode_identify_data, find_free_slot, parse_smart_data, AhciError,
+    AllowedCommand, BlockDevice, SmartTelemetry,
 };
+use optios_partition_table::{parse_gpt, parse_mbr, GptPartition};
 
 use crate::drivers::pci::{self, PciDevice};
 use crate::mm::{pmm, vmm};
@@ -54,55 +59,55 @@ pub const TIMEOUT_BOH_MS: u64 = 500;
 
 /// Persistent per-port structure managing AHCI registers and dedicated DMA frames.
 pub struct AhciPort {
+    #[allow(dead_code)]
     pub port_number: u8,
     pub reg_base: u64,
-    pub dma_frame_phys: u64,
-    pub dma_frame_virt: u64,
+    pub ctrl_frame_phys: u64,
+    pub ctrl_frame_virt: u64,
+    pub data_frame_phys: u64,
+    pub data_frame_virt: u64,
     pub ncs: u8,
     #[allow(dead_code)]
     pub s64a: bool,
     pub failed: AtomicBool,
+    pub total_sectors: u64,
 }
 
 impl AhciPort {
-    /// Initializes and brings up a SATA port with dedicated DMA structures.
+    /// Initializes and brings up a SATA port with dedicated control and data DMA frames.
     pub unsafe fn init(
         port_number: u8,
         reg_base: u64,
         ncs: u8,
         s64a: bool,
     ) -> Result<Self, AhciError> {
-        // Allocate 1 dedicated 4 KiB physical frame from PMM for the lifetime of this port.
-        // Memory layout within the 4 KiB frame:
+        // Allocate 1 dedicated 4 KiB physical frame for control structures:
         // @0x000: Command List (1024 B = 32 slots * 32 B)  -> 1 KiB aligned
         // @0x400: Received FIS (256 B)                      -> 256 B aligned
         // @0x500: Command Table 0 (144 B)                  -> 128 B aligned
-        // @0x800: Data Buffer (512 B)                       -> 512 B aligned
-        let frame_phys = pmm::alloc_frame().ok_or(AhciError::NotPresent)?;
-        let frame_virt = vmm::phys_to_virt::<u8>(frame_phys) as u64;
+        let ctrl_frame_phys = pmm::alloc_frame().ok_or(AhciError::NotPresent)?;
+        let ctrl_frame_virt = vmm::phys_to_virt::<u8>(ctrl_frame_phys) as u64;
+        core::ptr::write_bytes(ctrl_frame_virt as *mut u8, 0, 4096);
 
-        core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
+        // Allocate 1 dedicated 4 KiB physical frame for sector DMA transfers (8 sectors max per chunk)
+        let data_frame_phys = pmm::alloc_frame().ok_or(AhciError::NotPresent)?;
+        let data_frame_virt = vmm::phys_to_virt::<u8>(data_frame_phys) as u64;
+        core::ptr::write_bytes(data_frame_virt as *mut u8, 0, 4096);
 
-        let clb_phys = frame_phys;
-        let fb_phys = frame_phys + 0x400;
-        let ctba0_phys = frame_phys + 0x500;
-        let buf_phys = frame_phys + 0x800;
+        let clb_phys = ctrl_frame_phys;
+        let fb_phys = ctrl_frame_phys + 0x400;
+        let ctba0_phys = ctrl_frame_phys + 0x500;
 
-        // Verify alignment constraints per AHCI 1.3 spec
         assert!(clb_phys % 1024 == 0, "AHCI: CLB must be 1 KiB aligned");
         assert!(fb_phys % 256 == 0, "AHCI: FB must be 256 B aligned");
         assert!(ctba0_phys % 128 == 0, "AHCI: CTBA must be 128 B aligned");
-        assert!(buf_phys % 2 == 0, "AHCI: Data buffer must be word aligned");
+        assert!(
+            data_frame_phys % 512 == 0,
+            "AHCI: Data buffer must be 512 B aligned"
+        );
 
-        // 32-bit DMA capability check: if S64A is 0, addresses must be < 4 GiB
         if !s64a {
-            if clb_phys > 0xFFFF_FFFF
-                || fb_phys > 0xFFFF_FFFF
-                || ctba0_phys > 0xFFFF_FFFF
-                || buf_phys > 0xFFFF_FFFF
-            {
-                warn!("AHCI: Controller lacks 64-bit DMA (S64A=0) but physical frame is above 4 GiB!");
-                pmm::free_frame(frame_phys);
+            if clb_phys > 0xFFFF_FFFF || fb_phys > 0xFFFF_FFFF || data_frame_phys > 0xFFFF_FFFF {
                 return Err(AhciError::DmaAddressAbove4G);
             }
         }
@@ -110,20 +115,21 @@ impl AhciPort {
         let port = Self {
             port_number,
             reg_base,
-            dma_frame_phys: frame_phys,
-            dma_frame_virt: frame_virt,
+            ctrl_frame_phys,
+            ctrl_frame_virt,
+            data_frame_phys,
+            data_frame_virt,
             ncs,
             s64a,
             failed: AtomicBool::new(false),
+            total_sectors: 0,
         };
 
-        // Port bring-up sequence per AHCI spec
         port.bring_up()?;
-
         Ok(port)
     }
 
-    /// Stops port DMA engines (ST and FRE) with bounded time timeouts.
+    /// Stops command and FIS receive engines per AHCI 1.3 spec Section 10.3.1.
     pub unsafe fn stop_engine(&self) -> Result<(), AhciError> {
         let mut cmd = mmio_read32(self.reg_base, 0x18);
         cmd &= !HBA_PXCMD_ST;
@@ -146,37 +152,28 @@ impl AhciPort {
 
     /// Brings up port DMA engines with programmed pointers.
     pub unsafe fn bring_up(&self) -> Result<(), AhciError> {
-        // 1. Clear ST and wait for CR=0 (up to 500 ms)
-        // 2. Clear FRE and wait for FR=0 (up to 500 ms)
         let _ = self.stop_engine();
 
-        let clb_phys = self.dma_frame_phys;
-        let fb_phys = self.dma_frame_phys + 0x400;
+        let clb_phys = self.ctrl_frame_phys;
+        let fb_phys = self.ctrl_frame_phys + 0x400;
 
-        // 3. Write CLB/CLBU and FB/FBU (both 32-bit halves)
         mmio_write32(self.reg_base, 0x00, (clb_phys & 0xFFFF_FFFF) as u32);
         mmio_write32(self.reg_base, 0x04, (clb_phys >> 32) as u32);
         mmio_write32(self.reg_base, 0x08, (fb_phys & 0xFFFF_FFFF) as u32);
         mmio_write32(self.reg_base, 0x0C, (fb_phys >> 32) as u32);
 
-        // 4. Clear pending PxSERR and PxIS
         mmio_write32(self.reg_base, 0x30, 0xFFFF_FFFF);
         mmio_write32(self.reg_base, 0x10, 0xFFFF_FFFF);
-
-        // 5. Ensure interrupts on this port are disabled (polling mode)
         mmio_write32(self.reg_base, 0x14, 0);
 
-        // 6. Set FRE
         let mut cmd = mmio_read32(self.reg_base, 0x18);
         cmd |= HBA_PXCMD_FRE;
         mmio_write32(self.reg_base, 0x18, cmd);
 
-        // 7. Wait until BSY and DRQ clear in PxTFD (timeout 1000 ms)
         time::wait_until(TIMEOUT_PORT_BUSY_MS, || {
             (mmio_read32(self.reg_base, 0x20) & (ATA_DEV_BSY | ATA_DEV_DRQ)) == 0
         })?;
 
-        // 8. Set ST
         cmd = mmio_read32(self.reg_base, 0x18);
         cmd |= HBA_PXCMD_ST;
         mmio_write32(self.reg_base, 0x18, cmd);
@@ -193,51 +190,38 @@ impl AhciPort {
         }
     }
 
-    /// Executes a safe Read-Only ATA command via DMA.
-    /// Only variants of `AllowedCommand` can be passed.
-    pub unsafe fn execute_command(&self, cmd: AllowedCommand) -> Result<(), AhciError> {
+    /// Executes an ATA command with specified payload size (up to 4096 bytes).
+    unsafe fn dispatch_command(
+        &self,
+        slot: u8,
+        byte_count: u32,
+        build_fis: impl FnOnce(&mut [u8]) -> Result<(), AhciError>,
+    ) -> Result<(), AhciError> {
         if self.failed.load(Ordering::SeqCst) {
             return Err(AhciError::PortFailed);
         }
 
-        let slot = self.find_free_slot()?;
-        let ctba_phys = self.dma_frame_phys + 0x500;
-        let buf_phys = self.dma_frame_phys + 0x800;
+        let ctba_phys = self.ctrl_frame_phys + 0x500;
+        let cmd_hdr_ptr = (self.ctrl_frame_virt + (slot as u64 * 32)) as *mut u32;
+        let cfis_ptr = (self.ctrl_frame_virt + 0x500) as *mut u8;
+        let prdt_ptr = (self.ctrl_frame_virt + 0x580) as *mut u32;
 
-        // Pointers inside the dedicated frame
-        let cmd_hdr_ptr = (self.dma_frame_virt + (slot as u64 * 32)) as *mut u32;
-        let cfis_ptr = (self.dma_frame_virt + 0x500) as *mut u8;
-        let prdt_ptr = (self.dma_frame_virt + 0x580) as *mut u32;
-        let buf_ptr = (self.dma_frame_virt + 0x800) as *mut u8;
-
-        // Zero destination buffer
-        core::ptr::write_bytes(buf_ptr, 0, 512);
-
-        // Build CFIS (20 bytes)
         let cfis_slice = core::slice::from_raw_parts_mut(cfis_ptr, 20);
-        build_h2d_register_fis(cmd, cfis_slice)?;
+        build_fis(cfis_slice)?;
 
-        // Build PRDT (1 entry for 512 bytes)
         let prdt_slice = core::slice::from_raw_parts_mut(prdt_ptr, 4);
-        build_prdt_entry(buf_phys, 512, false, prdt_slice)?;
+        build_prdt_entry(self.data_frame_phys, byte_count, false, prdt_slice)?;
 
-        // Build Command Header (32 bytes: dw0..dw3)
-        // cfl=5 dwords (20 bytes), prdtl=1 (strictly read-only by builder construction)
         let cmd_hdr_slice = core::slice::from_raw_parts_mut(cmd_hdr_ptr, 4);
         build_command_header(5, 1, ctba_phys, cmd_hdr_slice)?;
 
-        // Wait until port is not BSY / DRQ before issue (timeout 1000 ms)
         time::wait_until(TIMEOUT_PORT_BUSY_MS, || {
             (mmio_read32(self.reg_base, 0x20) & (ATA_DEV_BSY | ATA_DEV_DRQ)) == 0
         })?;
 
-        // Memory fence before issuing command
         compiler_fence(Ordering::SeqCst);
-
-        // Issue command slot via PxCI
         mmio_write32(self.reg_base, 0x38, 1u32 << slot);
 
-        // Wait for command completion (PxCI bit cleared, or Task File Error / TFD error)
         let wait_res = time::wait_until(TIMEOUT_CMD_COMPLETE_MS, || {
             let ci = mmio_read32(self.reg_base, 0x38);
             let is = mmio_read32(self.reg_base, 0x10);
@@ -245,66 +229,123 @@ impl AhciPort {
             (ci & (1u32 << slot)) == 0 || (is & HBA_PXIS_TFES) != 0 || (tfd & ATA_TFD_ERR) != 0
         });
 
-        // Check for task file errors or timeout
         let is = mmio_read32(self.reg_base, 0x10);
         let tfd = mmio_read32(self.reg_base, 0x20);
 
         if wait_res.is_err() || (is & HBA_PXIS_TFES) != 0 || (tfd & ATA_TFD_ERR) != 0 {
-            // Error recovery sequence per AHCI spec: stop engine, clear errors
             let _ = self.stop_engine();
-            mmio_write32(self.reg_base, 0x30, 0xFFFF_FFFF); // Clear PxSERR
-            mmio_write32(self.reg_base, 0x10, 0xFFFF_FFFF); // Clear PxIS
+            mmio_write32(self.reg_base, 0x10, 0xFFFF_FFFF);
+            mmio_write32(self.reg_base, 0x30, 0xFFFF_FFFF);
 
-            // Check PxTFD after stopping the engine
             let tfd_after = mmio_read32(self.reg_base, 0x20);
             let bsy = (tfd_after & ATA_DEV_BSY) != 0;
             let drq = (tfd_after & ATA_DEV_DRQ) != 0;
-            let err = (tfd_after & ATA_TFD_ERR) != 0;
 
             if bsy || drq {
                 self.failed.store(true, Ordering::SeqCst);
-                warn!(
-                    "AHCI: Port {} hung after recovery (PxTFD=0x{:08x}: BSY={}, DRQ={}, ERR={}). Port marked Failed; ST not re-enabled.",
-                    self.port_number, tfd_after, bsy, drq, err
-                );
                 return Err(AhciError::PortFailed);
             }
 
-            // If BSY and DRQ are clear, restore FRE first, then ST (same order as bring_up per AHCI 1.3 spec)
-            let mut pcmd = mmio_read32(self.reg_base, 0x18);
-            pcmd |= HBA_PXCMD_FRE;
-            mmio_write32(self.reg_base, 0x18, pcmd);
+            let mut cmd_reg = mmio_read32(self.reg_base, 0x18);
+            cmd_reg |= HBA_PXCMD_FRE;
+            mmio_write32(self.reg_base, 0x18, cmd_reg);
 
-            pcmd = mmio_read32(self.reg_base, 0x18);
-            pcmd |= HBA_PXCMD_ST;
-            mmio_write32(self.reg_base, 0x18, pcmd);
-
-            warn!(
-                "AHCI: Port {} recovered engine after error (PxTFD=0x{:08x}: BSY={}, DRQ={}, ERR={}). FRE and ST re-enabled.",
-                self.port_number, tfd_after, bsy, drq, err
-            );
+            cmd_reg = mmio_read32(self.reg_base, 0x18);
+            cmd_reg |= HBA_PXCMD_ST;
+            mmio_write32(self.reg_base, 0x18, cmd_reg);
 
             if wait_res.is_err() {
                 return Err(AhciError::Timeout);
+            } else {
+                return Err(AhciError::TaskFileError);
             }
-            return Err(AhciError::TaskFileError);
         }
 
         Ok(())
     }
 
-    /// Reads the 256 words of IDENTIFY data from the data buffer.
+    /// Executes an ATA IDENTIFY DEVICE command.
+    pub unsafe fn execute_command(&self, cmd: AllowedCommand) -> Result<(), AhciError> {
+        let slot = self.find_free_slot()?;
+        self.dispatch_command(slot, 512, |slice| build_h2d_register_fis(cmd, slice))
+    }
+
+    /// Executes an ATA READ DMA EXT command for `sector_count` sectors (1..=8).
+    pub unsafe fn execute_read_dma_ext(
+        &self,
+        lba: u64,
+        sector_count: u16,
+    ) -> Result<(), AhciError> {
+        if sector_count == 0 || sector_count > 8 {
+            return Err(AhciError::BufferTooSmall);
+        }
+        let slot = self.find_free_slot()?;
+        let bytes = sector_count as u32 * 512;
+        self.dispatch_command(slot, bytes, |slice| {
+            build_read_dma_ext_fis(lba, sector_count, slice)
+        })
+    }
+
+    /// Reads arbitrary consecutive sectors using 8-sector (4 KiB) DMA chunks.
+    pub unsafe fn read_sectors(
+        &self,
+        mut lba: u64,
+        mut count: u32,
+        buf: &mut [u8],
+    ) -> Result<(), AhciError> {
+        if buf.len() < (count as usize * 512) {
+            return Err(AhciError::BufferTooSmall);
+        }
+        let mut buf_offset = 0;
+        while count > 0 {
+            let chunk_sectors = count.min(8) as u16;
+            let chunk_bytes = chunk_sectors as usize * 512;
+            self.execute_read_dma_ext(lba, chunk_sectors)?;
+            let src = core::slice::from_raw_parts(self.data_frame_virt as *const u8, chunk_bytes);
+            buf[buf_offset..buf_offset + chunk_bytes].copy_from_slice(src);
+            buf_offset += chunk_bytes;
+            lba += chunk_sectors as u64;
+            count -= chunk_sectors as u32;
+        }
+        Ok(())
+    }
+
+    /// Executes ATA SMART READ DATA (`0xB0` / `0xD0`) and parses vital telemetry.
+    pub unsafe fn read_smart_data(&self) -> Result<SmartTelemetry, AhciError> {
+        let slot = self.find_free_slot()?;
+        self.dispatch_command(slot, 512, |slice| build_smart_read_data_fis(slice))?;
+        let src = core::slice::from_raw_parts(self.data_frame_virt as *const u8, 512);
+        let mut raw_data = [0u8; 512];
+        raw_data.copy_from_slice(src);
+        Ok(parse_smart_data(&raw_data))
+    }
+
+    /// Reads the 512-byte payload from IDENTIFY DEVICE.
     pub unsafe fn read_identify_buffer(&self) -> [u16; 256] {
         let mut words = [0u16; 256];
-        let src = (self.dma_frame_virt + 0x800) as *const u16;
+        let buf_ptr = self.data_frame_virt as *const u16;
         for i in 0..256 {
-            words[i] = read_volatile(src.add(i));
+            words[i] = read_volatile(buf_ptr.add(i));
         }
         words
     }
 }
 
-/// Identified SATA disk drive metadata and S.M.A.R.T. telemetry.
+impl BlockDevice for AhciPort {
+    fn read_sectors(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> Result<(), AhciError> {
+        unsafe { AhciPort::read_sectors(self, lba, count, buf) }
+    }
+
+    fn sector_size(&self) -> u32 {
+        512
+    }
+
+    fn total_sectors(&self) -> u64 {
+        self.total_sectors
+    }
+}
+
+/// Discovered and verified drive metadata.
 #[derive(Debug, Clone)]
 pub struct AhciDriveInfo {
     pub port_number: u8,
@@ -315,9 +356,15 @@ pub struct AhciDriveInfo {
     pub capacity_mib: u64,
     pub smart_supported: bool,
     pub smart_enabled: bool,
+    pub smart_telemetry: Option<SmartTelemetry>,
+    pub partitions: Vec<GptPartition>,
+    #[allow(dead_code)]
+    pub has_gpt: bool,
+    #[allow(dead_code)]
+    pub has_mbr: bool,
 }
 
-/// Summary of the AHCI controller and all discovered SATA drives.
+/// Telemetry structure capturing AHCI controller capabilities and discovered drives.
 #[derive(Debug, Clone)]
 pub struct AhciControllerInfo {
     pub present: bool,
@@ -332,8 +379,7 @@ pub struct AhciControllerInfo {
     pub version_major: u16,
     pub version_minor: u16,
     pub ports_implemented: u32,
-    pub atapi_ports_count: usize,
-    #[allow(dead_code)]
+    pub atapi_ports_count: u32,
     pub s64a: bool,
     pub ncs: u8,
     pub boh: bool,
@@ -377,6 +423,9 @@ pub unsafe fn mmio_write32(base: u64, offset: usize, val: u32) {
 /// Global list of initialized AHCI ports.
 static mut PORTS: Vec<AhciPort> = Vec::new();
 
+/// Global controller telemetry cache.
+static mut CONTROLLER_INFO: Option<AhciControllerInfo> = None;
+
 /// Returns a reference to an initialized port by port number.
 #[allow(dead_code)]
 pub fn get_port(port_num: u8) -> Option<&'static AhciPort> {
@@ -386,96 +435,86 @@ pub fn get_port(port_num: u8) -> Option<&'static AhciPort> {
     }
 }
 
+/// Returns a copy of the controller and drive metadata.
+pub fn get_controller_info() -> Option<AhciControllerInfo> {
+    unsafe {
+        let info_ptr = &raw const CONTROLLER_INFO;
+        (*info_ptr).clone()
+    }
+}
+
 /// Probes the PCI inventory for a SATA AHCI 1.0 controller, validates BAR5,
 /// performs BOHC handoff, configures ports with dedicated DMA frames,
-/// and queries ATA IDENTIFY DEVICE in Read-Only mode.
-pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
+/// interrogates drives via `IDENTIFY DEVICE`, reads S.M.A.R.T. telemetry,
+/// and discovers GPT/MBR partition tables.
+pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
     let mut info = AhciControllerInfo::default();
 
-    let Some(ahci_pci) = pci_devices
+    let ahci_dev = devices
         .iter()
-        .find(|d| d.class_code == 0x01 && d.subclass == 0x06 && d.prog_if == 0x01)
-    else {
-        warn!("AHCI: No SATA AHCI 1.0 controller (01:06:01) found on PCI bus.");
-        return info;
-    };
+        .find(|d| d.class_code == 0x01 && d.subclass == 0x06 && d.prog_if == 0x01);
 
-    info.present = true;
-    info.pci_bus = ahci_pci.bus;
-    info.pci_device = ahci_pci.device;
-    info.pci_function = ahci_pci.function;
-    info.vendor_id = ahci_pci.vendor_id;
-    info.device_id = ahci_pci.device_id;
-
-    // 1. Read initial PCI Command Register (16-bit word at offset 0x04)
-    let orig_cmd = pci::pci_read_config_word(ahci_pci.bus, ahci_pci.device, ahci_pci.function, 0x04);
-
-    // 2. Validate ABAR (BAR5 at offset 0x24)
-    let raw_bar5 = pci::pci_read_config_dword(ahci_pci.bus, ahci_pci.device, ahci_pci.function, 0x24);
-
-    // Must be Memory Space BAR (bit 0 == 0)
-    if (raw_bar5 & 0x01) != 0 {
-        warn!("AHCI: BAR5 is I/O space, not Memory space. Rejecting controller.");
-        return info;
-    }
-
-    // Decode memory type bits (bits 2:1):
-    // 00b = 32-bit BAR (valid for Type-0 PCI header BAR5)
-    // 10b = 64-bit BAR (invalid because Type-0 PCI header has no BAR6 at 0x28)
-    let bar_type = (raw_bar5 >> 1) & 0x03;
-    if bar_type == 0x02 {
-        warn!("AHCI: BAR5 reports 64-bit memory space, but Type-0 PCI header has no BAR6. Rejecting controller.");
-        return info;
-    }
-
-    let abar_phys = (raw_bar5 & 0xFFFF_FFF0) as u64;
-    if abar_phys == 0 {
-        warn!("AHCI: Controller BAR5 (ABAR) is unallocated (0x0)!");
-        return info;
-    }
-    info.abar_phys = abar_phys;
-
-    // Size the BAR per PCI specification:
-    // Temporarily disable Memory Space decoding (bit 1) and Bus Mastering (bit 2) via 16-bit write
-    // so Status register write-1-to-clear bits at offset 0x06 are unaffected.
-    let disabled_cmd = orig_cmd & !((1 << 1) | (1 << 2));
-    pci::pci_write_config_word(ahci_pci.bus, ahci_pci.device, ahci_pci.function, 0x04, disabled_cmd);
-
-    // Write all 1s to determine BAR sizing mask, read back mask, and restore raw_bar5
-    pci::pci_write_config_dword(ahci_pci.bus, ahci_pci.device, ahci_pci.function, 0x24, 0xFFFF_FFFF);
-    let size_mask = pci::pci_read_config_dword(ahci_pci.bus, ahci_pci.device, ahci_pci.function, 0x24);
-    pci::pci_write_config_dword(ahci_pci.bus, ahci_pci.device, ahci_pci.function, 0x24, raw_bar5);
-
-    // Restore PCI Command Register with Memory Space (bit 1) and Bus Master (bit 2) enabled via 16-bit write
-    pci::pci_write_config_word(
-        ahci_pci.bus,
-        ahci_pci.device,
-        ahci_pci.function,
-        0x04,
-        orig_cmd | (1 << 1) | (1 << 2),
-    );
-
-    let bar_size = (!(size_mask & 0xFFFF_FFF0)).wrapping_add(1) as u64;
-    info.bar_size = bar_size;
-
-    // 3. Map ABAR MMIO registers uncached (WRITE_THROUGH | CACHE_DISABLE)
-    // Initially map first page (4 KiB or bounded by bar_size) to access Generic Host Registers
-    let initial_map_len = (bar_size as usize).min(4096);
-    let abar_virt = match vmm::map_mmio(abar_phys, initial_map_len) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("AHCI: Failed to map initial ABAR MMIO at 0x{:08x}: {}", abar_phys, e);
+    let dev = match ahci_dev {
+        Some(d) => d,
+        None => {
+            info!("AHCI: No SATA AHCI 1.0 controller found on PCI bus.");
             return info;
         }
     };
-    info.abar_virt = abar_virt;
+
+    info.present = true;
+    info.pci_bus = dev.bus;
+    info.pci_device = dev.device;
+    info.pci_function = dev.function;
+    info.vendor_id = dev.vendor_id;
+    info.device_id = dev.device_id;
 
     unsafe {
-        // Read Ports Implemented (PI) register at offset 0x0C
+        pci::enable_bus_mastering_and_mmio(dev.bus, dev.device, dev.function);
+
+        let bar5_raw = pci::pci_read_config_dword(dev.bus, dev.device, dev.function, 0x24);
+        if (bar5_raw & 0x01) != 0 {
+            warn!("AHCI: BAR5 is I/O space; AHCI requires 32-bit MMIO.");
+            return info;
+        }
+
+        let bar_type = (bar5_raw >> 1) & 0x03;
+        if bar_type == 0x02 {
+            warn!("AHCI: 64-bit BAR5 detected on Type-0 PCI header; unsupported in 32-bit MMIO.");
+            return info;
+        }
+
+        let abar_phys = (bar5_raw & 0xFFFF_FFF0) as u64;
+        if abar_phys == 0 {
+            warn!("AHCI: ABAR physical address is null.");
+            return info;
+        }
+        info.abar_phys = abar_phys;
+
+        let orig_cmd = pci::pci_read_config_word(dev.bus, dev.device, dev.function, 0x04);
+        pci::pci_write_config_word(dev.bus, dev.device, dev.function, 0x04, orig_cmd & !0x0002);
+
+        pci::pci_write_config_dword(dev.bus, dev.device, dev.function, 0x24, 0xFFFF_FFFF);
+        let size_mask = pci::pci_read_config_dword(dev.bus, dev.device, dev.function, 0x24);
+        pci::pci_write_config_dword(dev.bus, dev.device, dev.function, 0x24, bar5_raw);
+        pci::pci_write_config_word(dev.bus, dev.device, dev.function, 0x04, orig_cmd);
+
+        let bar_size = (!(size_mask & 0xFFFF_FFF0)).wrapping_add(1) as u64;
+        info.bar_size = bar_size;
+
+        let initial_map_len = (bar_size as usize).min(4096);
+        let abar_virt = match vmm::map_mmio(abar_phys, initial_map_len) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("AHCI: Failed to map initial ABAR MMIO at 0x{:08x}: {}", abar_phys, e);
+                return info;
+            }
+        };
+        info.abar_virt = abar_virt;
+
         let pi = mmio_read32(abar_virt, 0x0C);
         info.ports_implemented = pi;
 
-        // Map min(bar_size, 0x100 + 0x80 * (highest_implemented_port + 1)); never beyond the BAR
         let highest_implemented_port = if pi == 0 { 0 } else { 31 - pi.leading_zeros() as u64 };
         let needed_len = 0x100 + 0x80 * (highest_implemented_port + 1);
         let map_len = bar_size.min(needed_len);
@@ -488,15 +527,15 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
         }
 
         info!(
-            "AHCI: ABAR registers span {} bytes (BAR size: {} bytes, highest port: {}); MMIO mapping is page-granular (4096 bytes).",
-            map_len, bar_size, highest_implemented_port
+            "AHCI: ABAR registers span {} bytes (BAR size: {} bytes, highest port: {}); MMIO mapping is page-granular ({} bytes).",
+            needed_len,
+            bar_size,
+            highest_implemented_port,
+            ((map_len + 4095) / 4096) * 4096
         );
 
-        // 4. Ensure AHCI Enable (GHC.AE, bit 31) is active and Global Interrupts disabled (GHC.IE = 0)
-        let mut ghc = mmio_read32(abar_virt, 0x04);
-        ghc |= HBA_GHC_AE;
-        ghc &= !HBA_GHC_IE; // Polling mode only: no stray IRQs
-        mmio_write32(abar_virt, 0x04, ghc);
+        let ghc = mmio_read32(abar_virt, 0x04);
+        mmio_write32(abar_virt, 0x04, (ghc | HBA_GHC_AE) & !HBA_GHC_IE);
 
         let vs = mmio_read32(abar_virt, 0x10);
         info.version_major = ((vs >> 16) & 0xFFFF) as u16;
@@ -512,15 +551,9 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
         let boh = (cap2 & 1) != 0;
         info.boh = boh;
 
-        // BIOS/OS Handoff if supported.
-        // NOTE: QEMU's ICH9 AHCI controller does not advertise BOH (CAP2.BOH = 0).
-        // Therefore, this BIOS handoff code path is currently untested against physical UEFI firmware
-        // in virtualized test environments and requires physical hardware validation in future milestones.
         if boh {
             let bohc = mmio_read32(abar_virt, 0x28);
-            // Request OS ownership (set bit 1 = OOS)
             mmio_write32(abar_virt, 0x28, bohc | (1 << 1));
-            // Wait with timeout for BIOS ownership to clear (bit 0 = BOS)
             let handoff_res = time::wait_until(TIMEOUT_BOH_MS, || {
                 (mmio_read32(abar_virt, 0x28) & 1) == 0
             });
@@ -557,7 +590,6 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
             bar_size / 1024
         );
 
-        // 5. Initialize implemented ports (0..31)
         for port_num in 0..32u8 {
             if (pi & (1 << port_num)) == 0 {
                 continue;
@@ -568,7 +600,6 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
             let det = ssts & 0x0F;
             let ipm = (ssts >> 8) & 0x0F;
 
-            // DET == 3 (Device detected & PHY established) and IPM == 1 (Active state)
             if det != 3 || ipm != 1 {
                 continue;
             }
@@ -576,12 +607,13 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
             let sig = mmio_read32(port_base, 0x24);
             if sig == SATA_SIG_ATA {
                 match AhciPort::init(port_num, port_base, ncs, s64a) {
-                    Ok(port) => {
-                        // Issue IDENTIFY DEVICE (0xEC) in Read-Only mode
+                    Ok(mut port) => {
                         match port.execute_command(AllowedCommand::IdentifyDevice) {
                             Ok(()) => {
                                 let id_words = port.read_identify_buffer();
                                 let disk = decode_identify_data(&id_words);
+                                port.total_sectors = disk.total_sectors;
+
                                 info!(
                                     "AHCI Port {}: SATA Disk Model='{}', Serial='{}', FW='{}', Sectors={} ({} MiB), SMART=[Supported: {}, Enabled: {}] (Read-Only)",
                                     port_num,
@@ -593,6 +625,89 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
                                     disk.smart_supported,
                                     disk.smart_enabled
                                 );
+
+                                // Probe S.M.A.R.T. telemetry if supported
+                                let smart_telemetry = if disk.smart_supported {
+                                    match port.read_smart_data() {
+                                        Ok(tel) => {
+                                            info!(
+                                                "AHCI Port {}: S.M.A.R.T. Telemetry: Temp={:?}C, POH={:?}, Cycles={:?}, Realloc={:?}",
+                                                port_num,
+                                                tel.temperature_c,
+                                                tel.power_on_hours,
+                                                tel.power_cycles,
+                                                tel.reallocated_sectors
+                                            );
+                                            Some(tel)
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "AHCI Port {}: SMART READ DATA returned {:?}",
+                                                port_num, e
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                // Scan MBR/GPT partition tables
+                                let mut mbr_sector = [0u8; 512];
+                                let mut partitions = Vec::new();
+                                let mut has_mbr = false;
+                                let mut has_gpt = false;
+
+                                if let Ok(()) = port.read_sectors(0, 1, &mut mbr_sector) {
+                                    if let Ok(mbr) = parse_mbr(&mbr_sector) {
+                                        has_mbr = true;
+                                        if mbr.is_protective {
+                                            info!(
+                                                "AHCI Port {}: Partition Table: Protective MBR found (type 0xEE).",
+                                                port_num
+                                            );
+                                            let mut gpt_hdr_sector = [0u8; 512];
+                                            if let Ok(()) =
+                                                port.read_sectors(1, 1, &mut gpt_hdr_sector)
+                                            {
+                                                let mut entries_buf = alloc::vec![0u8; 16384];
+                                                if let Ok(()) =
+                                                    port.read_sectors(2, 32, &mut entries_buf)
+                                                {
+                                                    if let Ok(gpt) = parse_gpt(
+                                                        &gpt_hdr_sector,
+                                                        &entries_buf,
+                                                    ) {
+                                                        has_gpt = true;
+                                                        info!(
+                                                            "AHCI Port {}: GPT Header verified successfully (CRC32 valid, {} partitions).",
+                                                            port_num,
+                                                            gpt.partitions.len()
+                                                        );
+                                                        info!(
+                                                            "AHCI Port {}: Valid GPT partition table found ({} partitions):",
+                                                            port_num,
+                                                            gpt.partitions.len()
+                                                        );
+                                                        for part in &gpt.partitions {
+                                                            info!(
+                                                                "  -> Partition {}: '{}' ({}) LBA {}..{} ({} MiB)",
+                                                                part.index,
+                                                                part.name,
+                                                                part.type_name,
+                                                                part.start_lba,
+                                                                part.end_lba,
+                                                                part.size_mib
+                                                            );
+                                                        }
+                                                        partitions = gpt.partitions;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 info.drives.push(AhciDriveInfo {
                                     port_number: port_num,
                                     model: disk.model,
@@ -602,6 +717,10 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
                                     capacity_mib: disk.capacity_mib,
                                     smart_supported: disk.smart_supported,
                                     smart_enabled: disk.smart_enabled,
+                                    smart_telemetry,
+                                    partitions,
+                                    has_gpt,
+                                    has_mbr,
                                 });
                             }
                             Err(e) => {
@@ -617,14 +736,19 @@ pub fn init(pci_devices: &[PciDevice]) -> AhciControllerInfo {
                 }
             } else if sig == SATA_SIG_ATAPI {
                 info.atapi_ports_count += 1;
-                info!("AHCI Port {}: SATAPI Optical Drive detected (SIG=0xEB140101).", port_num);
-                // Also initialize the port structure for SATAPI so tests can probe it
+                info!(
+                    "AHCI Port {}: SATAPI Optical Drive detected (SIG=0xEB140101).",
+                    port_num
+                );
                 if let Ok(port) = AhciPort::init(port_num, port_base, ncs, s64a) {
                     let ports_raw = &raw mut PORTS;
                     (*ports_raw).push(port);
                 }
             }
         }
+
+        let ctrl_ptr = &raw mut CONTROLLER_INFO;
+        *ctrl_ptr = Some(info.clone());
     }
 
     info

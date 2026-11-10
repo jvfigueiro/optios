@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: SMBIOS / DMI Firmware Table Parser (Types 0, 1, 2)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! SMBIOS / DMI Firmware Table Parser for OptiOS.
 //! Extracts BIOS (Type 0), System (Type 1), and Baseboard (Type 2) hardware strings.
@@ -253,5 +253,19 @@ pub fn init(entry_32: Option<u64>, entry_64: Option<u64>, hhdm_offset: u64) -> S
         smbios.sys_version
     );
 
+    unsafe {
+        SMBIOS_CACHE = Some(smbios.clone());
+    }
+
     smbios
+}
+
+static mut SMBIOS_CACHE: Option<SmbiosInfo> = None;
+
+/// Returns cached SMBIOS firmware and system strings if previously parsed.
+pub fn get_info() -> Option<SmbiosInfo> {
+    unsafe {
+        let ptr = &raw const SMBIOS_CACHE;
+        (*ptr).clone()
+    }
 }

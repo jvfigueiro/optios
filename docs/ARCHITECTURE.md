@@ -1,3 +1,10 @@
+<!--
+// OptiOS
+// Copyright (C) 2026 João Figueiró. All rights reserved
+// Item: System Architecture Specification
+// Date: 2026-11-10
+-->
+
 # OptiOS — System Architecture
 
 ## 1. Overview
@@ -16,21 +23,28 @@ The kernel is structured in modular layers with strict boundaries:
 |      (Diagnostic Tools, GUI, Modular Applications)     |
 +--------------------------------------------------------+
                            |
-                           v  (Future Syscall ABI: System V AMD64)
+                           v  (Interactive Diagnostics / Future Syscalls)
 +--------------------------------------------------------+
-|                      Syscalls                          |
-+--------------------------------------------------------+
-|  VFS / Filesystems  |  Process / Scheduler | Networking|
+|             Interactive Shell & Diagnostics            |
+|        - opti-sh (Tab 5): 12 Built-in Commands         |
+|        - Line Editor, History & Monospace Terminal     |
 +--------------------------------------------------------+
 |              POSIX & Virtual File System               |
 |        - POSIX.1-2024 Errno & KernelResult<T>          |
 |        - Virtual File System (vfs::open/read/stat/ls)  |
-|        - USTAR Initramfs Driver (tarfs mounted at /)   |
+|        - USTAR Initramfs Driver (libs/ustar at /)      |
++--------------------------------------------------------+
+|             Storage & Partition Management             |
+|        - BlockDevice Trait (libs/ahci-proto)           |
+|        - MBR & GPT Pure Parsers (libs/partition-table) |
+|        - SATA AHCI DMA Sector Reads (READ DMA EXT)     |
+|        - S.M.A.R.T. Health Telemetry (SMART READ DATA) |
 +--------------------------------------------------------+
 |             Memory Management (mm)                     |
 |        - Physical Memory Manager (PMM - Bitmap)        |
 |        - Virtual Memory / 4-Level Paging (VMM + MMIO)  |
 |        - IrqSafe Kernel Heap Allocator (Rust alloc)    |
+|        - Video RAM Backbuffer (0xFFFF_D800_0000_0000)  |
 +--------------------------------------------------------+
 |            Firmware & Hardware Discovery               |
 |        - SMBIOS / DMI 2.x & 3.x Structure Parser       |
@@ -38,9 +52,9 @@ The kernel is structured in modular layers with strict boundaries:
 +--------------------------------------------------------+
 |                  Drivers & I/O                         |
 |        - Serial Console (16550 UART)                   |
-|        - Framebuffer (UEFI GOP / Bitmap Text Engine)   |
+|        - Framebuffer GOP with RAM Double Buffering     |
 |        - PS/2 Keyboard (IRQ 1 / Lock-Free Ring Buffer) |
-|        - SATA AHCI 1.0 Read-Only Driver + S.M.A.R.T.   |
+|        - SATA AHCI 1.0/1.3 Read-Only Storage Driver    |
 +--------------------------------------------------------+
 |              Architecture Abstraction                  |
 |        - arch/x86_64: I/O Ports, CPUID, GDT/TSS, IDT   |
@@ -67,11 +81,15 @@ The kernel is structured in modular layers with strict boundaries:
    - Parses the physical memory map and initializes the Physical Memory Manager (PMM) with low-memory (`< 1 MiB`) reservation;
    - Initializes the 4-Level Virtual Memory Manager (VMM) and maps the 2 MiB `IrqSafe` Kernel Heap (`0xFFFF_C000_0000_0000`);
    - Maps and inspects SMBIOS / DMI firmware tables (Types 0, 1, 2) and enumerates all PCI/PCIe buses (`0..=255`);
+   - Mounts the USTAR initramfs archive at `/` via `libs/ustar`;
    - Remaps the Dual 8259 PIC to vectors `32..47`, configures the PIT Channel 0 timer at 100 Hz, and initializes the PS/2 keyboard driver;
-   - Renders the multi-tab interactive diagnostic dashboard and enters the interrupt-driven (`sti` + `hlt`) event loop.
+   - Initializes the SATA AHCI controller, discovers attached drives, executes ATA `IDENTIFY DEVICE`, reads S.M.A.R.T. health data, reads LBA 0/1 to parse Protective MBR and GPT partitions via `libs/partition-table`;
+   - Allocates 4000 KiB from PMM for the Framebuffer backbuffer, enabling tear-free RAM double buffering;
+   - Initializes the `opti-sh` interactive diagnostic shell;
+   - Renders the 5-tab interactive diagnostic dashboard and enters the interrupt-driven (`sti` + `hlt`) event loop.
 
 ## 4. Debugging and Logging Strategy
 
 - **Serial Console (COM1 - 0x3F8):** Primary low-level telemetry channel. Operates without heap allocations or GPU drivers.
-- **Framebuffer:** Primary user visual diagnostic console.
+- **Framebuffer:** Primary user visual diagnostic console with 5 selectable views (System, PCI, Memory, Storage/SMART, Shell).
 - **QEMU Telemetry:** Serial redirected to file/stdio; automated screendump verification.

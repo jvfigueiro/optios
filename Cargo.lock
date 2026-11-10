@@ -27,8 +27,13 @@ version = "0.1.0"
 dependencies = [
  "limine",
  "optios-ahci-proto",
+ "optios-partition-table",
  "optios-ustar",
 ]
+
+[[package]]
+name = "optios-partition-table"
+version = "0.1.0"
 
 [[package]]
 name = "optios-ustar"

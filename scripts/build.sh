@@ -2,7 +2,7 @@
 # OptiOS
 # Copyright (C) 2026 João Figueiró. All rights reserved
 # Item: Kernel Compilation, USTAR Initramfs Builder & UEFI ISO Packager
-# Date: 2026-11-09
+# Date: 2026-11-10
 
 set -euo pipefail
 
@@ -17,7 +17,13 @@ BUILD_DIR="${PROJECT_ROOT}/build"
 INITRAMFS_STAGE="${BUILD_DIR}/initramfs_root"
 ISO_ROOT="${BUILD_DIR}/iso_root"
 OUTPUT_ISO="${BUILD_DIR}/optios.iso"
+TEST_DISK="${BUILD_DIR}/test_disk.img"
 LIMINE_DIR="${PROJECT_ROOT}/vendor/limine"
+
+# Ensure test disk with GPT is formatted
+if [ ! -f "${TEST_DISK}" ]; then
+    python3 "${PROJECT_ROOT}/scripts/format_gpt_disk.py" "${TEST_DISK}"
+fi
 
 echo "==> [OptiOS Build] Compilation mode: ${BUILD_MODE} ${EXTRA_CARGO_FLAGS}"
 

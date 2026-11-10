@@ -1,14 +1,14 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: PS/2 Keyboard Driver (IRQ 1, Lock-Free Ring Buffer, Scan Code Set 1)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! PS/2 Keyboard Driver (8042 Controller, IRQ 1 / Vector 33).
 //! Uses a lock-free SPSC ring buffer for ISR scancode queuing and Scan Code Set 1 translation.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::arch::x86_64::io::inb;
 use crate::info;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
@@ -34,6 +34,7 @@ pub enum KeyEvent {
     F2,
     F3,
     F4,
+    F5,
     ArrowUp,
     ArrowDown,
     ArrowLeft,
@@ -43,7 +44,6 @@ pub enum KeyEvent {
 /// Initializes the PS/2 keyboard driver by flushing any stale bytes in the 8042 output buffer.
 pub fn init() {
     unsafe {
-        // Flush pending bytes from the 8042 data port (up to 64 iterations)
         for _ in 0..64 {
             if (inb(PS2_STATUS_PORT) & 0x01) != 0 {
                 let _ = inb(PS2_DATA_PORT);
@@ -141,6 +141,7 @@ pub fn poll_key() -> Option<KeyEvent> {
             0x3C => return Some(KeyEvent::F2),
             0x3D => return Some(KeyEvent::F3),
             0x3E => return Some(KeyEvent::F4),
+            0x3F => return Some(KeyEvent::F5),
             _ => {
                 let shift = SHIFT_ACTIVE.load(Ordering::Relaxed);
                 if let Some(ch) = translate_ascii(code, shift) {
@@ -155,53 +156,335 @@ pub fn poll_key() -> Option<KeyEvent> {
 /// Translates Scan Code Set 1 byte into an ASCII character (US QWERTY layout).
 fn translate_ascii(code: u8, shift: bool) -> Option<char> {
     let ch = match code {
-        0x02 => if shift { '!' } else { '1' },
-        0x03 => if shift { '@' } else { '2' },
-        0x04 => if shift { '#' } else { '3' },
-        0x05 => if shift { '$' } else { '4' },
-        0x06 => if shift { '%' } else { '5' },
-        0x07 => if shift { '^' } else { '6' },
-        0x08 => if shift { '&' } else { '7' },
-        0x09 => if shift { '*' } else { '8' },
-        0x0A => if shift { '(' } else { '9' },
-        0x0B => if shift { ')' } else { '0' },
-        0x0C => if shift { '_' } else { '-' },
-        0x0D => if shift { '+' } else { '=' },
-        0x10 => if shift { 'Q' } else { 'q' },
-        0x11 => if shift { 'W' } else { 'w' },
-        0x12 => if shift { 'E' } else { 'e' },
-        0x13 => if shift { 'R' } else { 'r' },
-        0x14 => if shift { 'T' } else { 't' },
-        0x15 => if shift { 'Y' } else { 'y' },
-        0x16 => if shift { 'U' } else { 'u' },
-        0x17 => if shift { 'I' } else { 'i' },
-        0x18 => if shift { 'O' } else { 'o' },
-        0x19 => if shift { 'P' } else { 'p' },
-        0x1A => if shift { '{' } else { '[' },
-        0x1B => if shift { '}' } else { ']' },
-        0x1E => if shift { 'A' } else { 'a' },
-        0x1F => if shift { 'S' } else { 's' },
-        0x20 => if shift { 'D' } else { 'd' },
-        0x21 => if shift { 'F' } else { 'f' },
-        0x22 => if shift { 'G' } else { 'g' },
-        0x23 => if shift { 'H' } else { 'h' },
-        0x24 => if shift { 'J' } else { 'j' },
-        0x25 => if shift { 'K' } else { 'k' },
-        0x26 => if shift { 'L' } else { 'l' },
-        0x27 => if shift { ':' } else { ';' },
-        0x28 => if shift { '"' } else { '\'' },
-        0x29 => if shift { '~' } else { '`' },
-        0x2B => if shift { '|' } else { '\\' },
-        0x2C => if shift { 'Z' } else { 'z' },
-        0x2D => if shift { 'X' } else { 'x' },
-        0x2E => if shift { 'C' } else { 'c' },
-        0x2F => if shift { 'V' } else { 'v' },
-        0x30 => if shift { 'B' } else { 'b' },
-        0x31 => if shift { 'N' } else { 'n' },
-        0x32 => if shift { 'M' } else { 'm' },
-        0x33 => if shift { '<' } else { ',' },
-        0x34 => if shift { '>' } else { '.' },
-        0x35 => if shift { '?' } else { '/' },
+        0x02 => {
+            if shift {
+                '!'
+            } else {
+                '1'
+            }
+        }
+        0x03 => {
+            if shift {
+                '@'
+            } else {
+                '2'
+            }
+        }
+        0x04 => {
+            if shift {
+                '#'
+            } else {
+                '3'
+            }
+        }
+        0x05 => {
+            if shift {
+                '$'
+            } else {
+                '4'
+            }
+        }
+        0x06 => {
+            if shift {
+                '%'
+            } else {
+                '5'
+            }
+        }
+        0x07 => {
+            if shift {
+                '^'
+            } else {
+                '6'
+            }
+        }
+        0x08 => {
+            if shift {
+                '&'
+            } else {
+                '7'
+            }
+        }
+        0x09 => {
+            if shift {
+                '*'
+            } else {
+                '8'
+            }
+        }
+        0x0A => {
+            if shift {
+                '('
+            } else {
+                '9'
+            }
+        }
+        0x0B => {
+            if shift {
+                ')'
+            } else {
+                '0'
+            }
+        }
+        0x0C => {
+            if shift {
+                '_'
+            } else {
+                '-'
+            }
+        }
+        0x0D => {
+            if shift {
+                '+'
+            } else {
+                '='
+            }
+        }
+        0x10 => {
+            if shift {
+                'Q'
+            } else {
+                'q'
+            }
+        }
+        0x11 => {
+            if shift {
+                'W'
+            } else {
+                'w'
+            }
+        }
+        0x12 => {
+            if shift {
+                'E'
+            } else {
+                'e'
+            }
+        }
+        0x13 => {
+            if shift {
+                'R'
+            } else {
+                'r'
+            }
+        }
+        0x14 => {
+            if shift {
+                'T'
+            } else {
+                't'
+            }
+        }
+        0x15 => {
+            if shift {
+                'Y'
+            } else {
+                'y'
+            }
+        }
+        0x16 => {
+            if shift {
+                'U'
+            } else {
+                'u'
+            }
+        }
+        0x17 => {
+            if shift {
+                'I'
+            } else {
+                'i'
+            }
+        }
+        0x18 => {
+            if shift {
+                'O'
+            } else {
+                'o'
+            }
+        }
+        0x19 => {
+            if shift {
+                'P'
+            } else {
+                'p'
+            }
+        }
+        0x1A => {
+            if shift {
+                '{'
+            } else {
+                '['
+            }
+        }
+        0x1B => {
+            if shift {
+                '}'
+            } else {
+                ']'
+            }
+        }
+        0x1E => {
+            if shift {
+                'A'
+            } else {
+                'a'
+            }
+        }
+        0x1F => {
+            if shift {
+                'S'
+            } else {
+                's'
+            }
+        }
+        0x20 => {
+            if shift {
+                'D'
+            } else {
+                'd'
+            }
+        }
+        0x21 => {
+            if shift {
+                'F'
+            } else {
+                'f'
+            }
+        }
+        0x22 => {
+            if shift {
+                'G'
+            } else {
+                'g'
+            }
+        }
+        0x23 => {
+            if shift {
+                'H'
+            } else {
+                'h'
+            }
+        }
+        0x24 => {
+            if shift {
+                'J'
+            } else {
+                'j'
+            }
+        }
+        0x25 => {
+            if shift {
+                'K'
+            } else {
+                'k'
+            }
+        }
+        0x26 => {
+            if shift {
+                'L'
+            } else {
+                'l'
+            }
+        }
+        0x27 => {
+            if shift {
+                ':'
+            } else {
+                ';'
+            }
+        }
+        0x28 => {
+            if shift {
+                '"'
+            } else {
+                '\''
+            }
+        }
+        0x29 => {
+            if shift {
+                '~'
+            } else {
+                '`'
+            }
+        }
+        0x2B => {
+            if shift {
+                '|'
+            } else {
+                '\\'
+            }
+        }
+        0x2C => {
+            if shift {
+                'Z'
+            } else {
+                'z'
+            }
+        }
+        0x2D => {
+            if shift {
+                'X'
+            } else {
+                'x'
+            }
+        }
+        0x2E => {
+            if shift {
+                'C'
+            } else {
+                'c'
+            }
+        }
+        0x2F => {
+            if shift {
+                'V'
+            } else {
+                'v'
+            }
+        }
+        0x30 => {
+            if shift {
+                'B'
+            } else {
+                'b'
+            }
+        }
+        0x31 => {
+            if shift {
+                'N'
+            } else {
+                'n'
+            }
+        }
+        0x32 => {
+            if shift {
+                'M'
+            } else {
+                'm'
+            }
+        }
+        0x33 => {
+            if shift {
+                '<'
+            } else {
+                ','
+            }
+        }
+        0x34 => {
+            if shift {
+                '>'
+            } else {
+                '.'
+            }
+        }
+        0x35 => {
+            if shift {
+                '?'
+            } else {
+                '/'
+            }
+        }
         0x39 => ' ',
         _ => return None,
     };
