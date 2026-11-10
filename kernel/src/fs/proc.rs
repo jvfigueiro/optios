@@ -24,6 +24,8 @@ pub enum ProcFileType {
     Uptime,
     Pci,
     Disks,
+    Drivers,
+    Usb,
 }
 
 impl ProcFileType {
@@ -34,6 +36,8 @@ impl ProcFileType {
             Self::Uptime => "/proc/uptime",
             Self::Pci => "/proc/pci",
             Self::Disks => "/proc/disks",
+            Self::Drivers => "/proc/drivers",
+            Self::Usb => "/proc/usb",
         }
     }
 
@@ -45,6 +49,8 @@ impl ProcFileType {
             Self::Uptime => "uptime",
             Self::Pci => "pci",
             Self::Disks => "disks",
+            Self::Drivers => "drivers",
+            Self::Usb => "usb",
         }
     }
 
@@ -56,6 +62,8 @@ impl ProcFileType {
             "/proc/uptime" => Some(Self::Uptime),
             "/proc/pci" => Some(Self::Pci),
             "/proc/disks" => Some(Self::Disks),
+            "/proc/drivers" => Some(Self::Drivers),
+            "/proc/usb" => Some(Self::Usb),
             _ => None,
         }
     }
@@ -69,6 +77,8 @@ pub fn generate_proc_content(file: ProcFileType) -> String {
         ProcFileType::Uptime => generate_uptime(),
         ProcFileType::Pci => generate_pci(),
         ProcFileType::Disks => generate_disks(),
+        ProcFileType::Drivers => crate::drivers::kit::registry::format_proc_drivers(),
+        ProcFileType::Usb => crate::drivers::xhci::format_proc_usb(),
     }
 }
 
@@ -188,5 +198,7 @@ pub fn get_proc_file_list() -> Vec<(&'static str, usize)> {
         ("/proc/uptime", generate_uptime().len()),
         ("/proc/pci", generate_pci().len()),
         ("/proc/disks", generate_disks().len()),
+        ("/proc/drivers", crate::drivers::kit::registry::format_proc_drivers().len()),
+        ("/proc/usb", crate::drivers::xhci::format_proc_usb().len()),
     ]
 }

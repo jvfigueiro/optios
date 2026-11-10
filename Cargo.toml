@@ -8,6 +8,7 @@ members = [
     "libs/ansi-parser",
     "libs/opti-wm",
     "libs/fat32",
+    "libs/xhci-proto",
     "libs/opti-libc",
     "userland/sysinfo",
     "userland/cat",

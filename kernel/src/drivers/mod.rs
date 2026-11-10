@@ -12,3 +12,4 @@ pub mod mouse;
 pub mod pci;
 pub mod serial;
 pub mod video;
+pub mod xhci;

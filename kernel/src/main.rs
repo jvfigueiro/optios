@@ -39,6 +39,7 @@ use drivers::pci::scan_pci_bus;
 use drivers::serial::SERIAL1;
 use drivers::video::console;
 use drivers::video::framebuffer::{init_global_framebuffer, with_framebuffer};
+use drivers::xhci;
 use firmware::smbios;
 use fs::vfs;
 use mm::memmap::parse_memory_map;
@@ -241,6 +242,56 @@ pub extern "C" fn _start() -> ! {
             let _ = vfs::mount_fat32_sda1(port0, 2048, 32768);
         }
     }
+
+    // 16.2 Register Base Drivers in Driver Kit Registry
+    drivers::kit::registry::register_driver(
+        drivers::kit::registry::DriverMetadata {
+            name: "ahci",
+            spdx_license: "GPL-2.0-or-later",
+            origin: drivers::kit::registry::DriverOrigin::Native,
+            version: "1.3.0",
+        },
+        None,
+    );
+    drivers::kit::registry::register_driver(
+        drivers::kit::registry::DriverMetadata {
+            name: "ps2-kbd",
+            spdx_license: "GPL-2.0-or-later",
+            origin: drivers::kit::registry::DriverOrigin::Native,
+            version: "1.0.0",
+        },
+        None,
+    );
+    drivers::kit::registry::register_driver(
+        drivers::kit::registry::DriverMetadata {
+            name: "ps2-mouse",
+            spdx_license: "GPL-2.0-or-later",
+            origin: drivers::kit::registry::DriverOrigin::Native,
+            version: "1.0.0",
+        },
+        None,
+    );
+    drivers::kit::registry::register_driver(
+        drivers::kit::registry::DriverMetadata {
+            name: "uart-16550",
+            spdx_license: "GPL-2.0-or-later",
+            origin: drivers::kit::registry::DriverOrigin::Native,
+            version: "1.0.0",
+        },
+        None,
+    );
+    drivers::kit::registry::register_driver(
+        drivers::kit::registry::DriverMetadata {
+            name: "uefi-gop",
+            spdx_license: "GPL-2.0-or-later",
+            origin: drivers::kit::registry::DriverOrigin::Native,
+            version: "1.0.0",
+        },
+        None,
+    );
+
+    // 16.3 Initialize Native USB 3.0 xHCI Controller (Slice U1)
+    xhci::init(&pci_devices);
 
     // 17. Initialize Syscall Subsystem (AMD64 MSRs, TSS kernel stack, dispatcher)
     syscall::init();

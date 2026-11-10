@@ -62,6 +62,7 @@ dependencies = [
  "optios-partition-table",
  "optios-ustar",
  "optios-wm",
+ "optios-xhci-proto",
 ]
 
 [[package]]
@@ -92,4 +93,8 @@ version = "0.1.0"
 
 [[package]]
 name = "optios-wm"
+version = "0.1.0"
+
+[[package]]
+name = "optios-xhci-proto"
 version = "0.1.0"

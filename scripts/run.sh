@@ -59,10 +59,13 @@ if [ "${MODE}" = "--test" ] || [ "${MODE}" = "--headless" ]; then
     # Launch QEMU with Q35 chipset and attached SATA AHCI disk in background
     qemu-system-x86_64 \
         -machine q35 \
+        -cpu qemu64,+smep,+smap \
         -bios "${OVMF_BIOS}" \
         -cdrom "${ISO_IMAGE}" \
         -drive id=satadisk0,file="${TEST_DISK}",if=none,format=raw \
         -device ide-hd,drive=satadisk0,bus=ide.0,model="OptiOS_Test_SSD",serial="OPTI-2026-9901" \
+        -device qemu-xhci,id=xhci \
+        -device usb-mouse,bus=xhci.0 \
         -m 512M \
         -serial file:"${SERIAL_LOG}" \
         -display none \
@@ -86,17 +89,27 @@ try:
         sock.sendall(f'sendkey {k}\n'.encode())
         time.sleep(0.08)
     time.sleep(0.8)
-    # 2. Send interactive command: /bin/cat /mnt/sda1/recovery_log.txt
+    # 2. Send interactive command: /bin/cat /proc/drivers
+    for k in ['slash', 'b', 'i', 'n', 'slash', 'c', 'a', 't', 'spc', 'slash', 'p', 'r', 'o', 'c', 'slash', 'd', 'r', 'i', 'v', 'e', 'r', 's', 'ret']:
+        sock.sendall(f'sendkey {k}\n'.encode())
+        time.sleep(0.08)
+    time.sleep(0.8)
+    # 3. Send interactive command: /bin/cat /proc/usb
+    for k in ['slash', 'b', 'i', 'n', 'slash', 'c', 'a', 't', 'spc', 'slash', 'p', 'r', 'o', 'c', 'slash', 'u', 's', 'b', 'ret']:
+        sock.sendall(f'sendkey {k}\n'.encode())
+        time.sleep(0.08)
+    time.sleep(0.8)
+    # 4. Send interactive command: /bin/cat /mnt/sda1/recovery_log.txt
     for k in ['slash', 'b', 'i', 'n', 'slash', 'c', 'a', 't', 'spc', 'slash', 'm', 'n', 't', 'slash', 's', 'd', 'a', '1', 'slash', 'r', 'e', 'c', 'o', 'v', 'e', 'r', 'y', 'shift-minus', 'l', 'o', 'g', 'dot', 't', 'x', 't', 'ret']:
         sock.sendall(f'sendkey {k}\n'.encode())
         time.sleep(0.08)
     time.sleep(0.8)
-    # 3. Capture Fullscreen Text Console screendump with ls and cat output
+    # 5. Capture Fullscreen Text Console screendump with ls and cat output
     sock.sendall(b'screendump ${SCREENSHOT_M10_CONSOLE_PPM}\n')
     time.sleep(0.4)
     sock.sendall(b'screendump ${SCREENSHOT_M9_CONSOLE_PPM}\n')
     time.sleep(0.4)
-    # 4. Launch Ring 3 Editor: /bin/edit /mnt/sda1/recovery_log.txt
+    # 6. Launch Ring 3 Editor: /bin/edit /mnt/sda1/recovery_log.txt
     for k in ['slash', 'b', 'i', 'n', 'slash', 'e', 'd', 'i', 't', 'spc', 'slash', 'm', 'n', 't', 'slash', 's', 'd', 'a', '1', 'slash', 'r', 'e', 'c', 'o', 'v', 'e', 'r', 'y', 'shift-minus', 'l', 'o', 'g', 'dot', 't', 'x', 't', 'ret']:
         sock.sendall(f'sendkey {k}\n'.encode())
         time.sleep(0.08)
@@ -142,16 +155,23 @@ finally:
     cat "${SERIAL_LOG}"
     echo "--------------------------------------------------------"
 
-    # Objective compliance assertions for Milestone 10
+    # Objective compliance assertions for Security, Storage, Driver Kit and xHCI (Phase 4)
+    grep -q "CPU Security: SMEP=true, SMAP=true" "${SERIAL_LOG}" || { echo "FAILURE: SMEP/SMAP hardware activation missing"; exit 1; }
     grep -q "OptiOS Kernel — Milestone 10: FAT32 Storage VFS Mounts & Ring 3 Text Inspector" "${SERIAL_LOG}" || { echo "FAILURE: Milestone 10 boot banner missing"; exit 1; }
     grep -q "Limine Protocol: Base revision handshake successful." "${SERIAL_LOG}" || { echo "FAILURE: Limine protocol handshake missing"; exit 1; }
     grep -q "VFS initialized: Mounted USTAR initramfs" "${SERIAL_LOG}" || { echo "FAILURE: VFS USTAR initramfs mount missing"; exit 1; }
     grep -q "VFS: Mounted FAT32 filesystem on /dev/sda1" "${SERIAL_LOG}" || { echo "FAILURE: VFS FAT32 mount on /dev/sda1 missing"; exit 1; }
+    grep -q "(Read-Only, noexec)" "${SERIAL_LOG}" || { echo "FAILURE: FAT32 noexec mount policy missing"; exit 1; }
     grep -q "AHCI Controller" "${SERIAL_LOG}" || { echo "FAILURE: SATA AHCI controller initialization missing"; exit 1; }
     grep -q "OptiOS_Test_SSD" "${SERIAL_LOG}" || { echo "FAILURE: AHCI ATA IDENTIFY model 'OptiOS_Test_SSD' missing"; exit 1; }
+    grep -q "xHCI Controller" "${SERIAL_LOG}" || { echo "FAILURE: xHCI controller discovery missing"; exit 1; }
+    grep -q "xHCI: Command Ring DMA verified! CommandCompletionEvent received: Code=1" "${SERIAL_LOG}" || { echo "FAILURE: xHCI Command Ring DMA No-Op verification missing"; exit 1; }
+    grep -q "xHCI Root Hub Port" "${SERIAL_LOG}" || { echo "FAILURE: xHCI Root Hub port enumeration missing"; exit 1; }
     grep -q "Syscall subsystem initialized" "${SERIAL_LOG}" || { echo "FAILURE: Syscall subsystem initialization missing"; exit 1; }
     grep -q "OptiOS 1.0" "${SERIAL_LOG}" || { echo "FAILURE: OptiOS 1.0 MOTD header missing"; exit 1; }
     grep -q "Copyright (C) 2026 João Figueiró" "${SERIAL_LOG}" || grep -q "Copyright (C) 2026 Joao Figueiro" "${SERIAL_LOG}" || { echo "FAILURE: Copyright MOTD missing"; exit 1; }
+    grep -q "opti-sh: Executing command '/bin/cat /proc/drivers'" "${SERIAL_LOG}" || { echo "FAILURE: /proc/drivers execution missing"; exit 1; }
+    grep -q "opti-sh: Executing command '/bin/cat /proc/usb'" "${SERIAL_LOG}" || { echo "FAILURE: /proc/usb execution missing"; exit 1; }
     grep -q "opti-sh: Executing command 'ls /mnt/sda1'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of 'ls /mnt/sda1' missing"; exit 1; }
     grep -q "opti-sh: Executing command '/bin/cat /mnt/sda1/recovery_log.txt'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of '/bin/cat /mnt/sda1/recovery_log.txt' missing"; exit 1; }
     grep -q "Executing ELF64 binary '/bin/cat' in Ring 3" "${SERIAL_LOG}" || { echo "FAILURE: /bin/cat Ring 3 execution missing"; exit 1; }
@@ -184,13 +204,16 @@ finally:
 
     echo "==> [OptiOS Test] Milestone 10 Automated Verification: PASSED SUCCESSFULLY!"
 else
-    echo "==> [OptiOS Run] Launching QEMU (Q35 chipset + AHCI SSD) with serial forwarded to stdio..."
+    echo "==> [OptiOS Run] Launching QEMU (Q35 chipset + AHCI SSD + xHCI USB) with serial forwarded to stdio..."
     qemu-system-x86_64 \
         -machine q35 \
+        -cpu qemu64,+smep,+smap \
         -bios "${OVMF_BIOS}" \
         -cdrom "${ISO_IMAGE}" \
         -drive id=satadisk0,file="${TEST_DISK}",if=none,format=raw \
         -device ide-hd,drive=satadisk0,bus=ide.0,model="OptiOS_Test_SSD",serial="OPTI-2026-9901" \
+        -device qemu-xhci,id=xhci \
+        -device usb-mouse,bus=xhci.0 \
         -m 512M \
         -serial stdio \
         -no-reboot

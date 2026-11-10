@@ -1,0 +1,7 @@
+[package]
+license = "GPL-2.0-or-later"
+name = "optios-xhci-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]

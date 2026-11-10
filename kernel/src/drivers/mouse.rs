@@ -181,6 +181,30 @@ pub fn on_irq12() {
                     (*cur).btn_left = btn_left;
                     (*cur).btn_right = btn_right;
                     (*cur).btn_middle = btn_middle;
+
+                    // Publish agnostic input events to Driver Kit queue
+                    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::PointerMove {
+                        dx,
+                        dy: screen_dy,
+                    });
+                    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::PointerAbs {
+                        x: new_x as u32,
+                        y: new_y as u32,
+                    });
+                    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::MouseButton {
+                        button: crate::drivers::kit::MouseButtonKind::Left,
+                        pressed: btn_left,
+                    });
+                    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::MouseButton {
+                        button: crate::drivers::kit::MouseButtonKind::Right,
+                        pressed: btn_right,
+                    });
+                    if btn_middle {
+                        crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::MouseButton {
+                            button: crate::drivers::kit::MouseButtonKind::Middle,
+                            pressed: true,
+                        });
+                    }
                 }
             }
             _ => {

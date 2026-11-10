@@ -98,8 +98,55 @@ fn pop_scancode() -> Option<u8> {
     Some(scancode)
 }
 
+/// Converts a high-level `KeyEvent` into an agnostic `KeyCode`.
+fn key_event_to_keycode(key: KeyEvent) -> crate::drivers::kit::KeyCode {
+    use crate::drivers::kit::KeyCode;
+    match key {
+        KeyEvent::Char(c) => match c.to_ascii_uppercase() {
+            'A' => KeyCode::A, 'B' => KeyCode::B, 'C' => KeyCode::C, 'D' => KeyCode::D,
+            'E' => KeyCode::E, 'F' => KeyCode::F, 'G' => KeyCode::G, 'H' => KeyCode::H,
+            'I' => KeyCode::I, 'J' => KeyCode::J, 'K' => KeyCode::K, 'L' => KeyCode::L,
+            'M' => KeyCode::M, 'N' => KeyCode::N, 'O' => KeyCode::O, 'P' => KeyCode::P,
+            'Q' => KeyCode::Q, 'R' => KeyCode::R, 'S' => KeyCode::S, 'T' => KeyCode::T,
+            'U' => KeyCode::U, 'V' => KeyCode::V, 'W' => KeyCode::W, 'X' => KeyCode::X,
+            'Y' => KeyCode::Y, 'Z' => KeyCode::Z,
+            '0' => KeyCode::Num0, '1' => KeyCode::Num1, '2' => KeyCode::Num2, '3' => KeyCode::Num3,
+            '4' => KeyCode::Num4, '5' => KeyCode::Num5, '6' => KeyCode::Num6, '7' => KeyCode::Num7,
+            '8' => KeyCode::Num8, '9' => KeyCode::Num9,
+            ' ' => KeyCode::Space,
+            '-' => KeyCode::Minus, '=' => KeyCode::Equal,
+            '[' => KeyCode::LeftBracket, ']' => KeyCode::RightBracket, '\\' => KeyCode::Backslash,
+            ';' => KeyCode::Semicolon, '\'' => KeyCode::Apostrophe, '`' => KeyCode::Grave,
+            ',' => KeyCode::Comma, '.' => KeyCode::Period, '/' => KeyCode::Slash,
+            _ => KeyCode::Unknown(c as u16),
+        },
+        KeyEvent::Enter => KeyCode::Enter,
+        KeyEvent::Escape => KeyCode::Escape,
+        KeyEvent::Backspace => KeyCode::Backspace,
+        KeyEvent::Tab => KeyCode::Tab,
+        KeyEvent::F1 => KeyCode::F1,
+        KeyEvent::F2 => KeyCode::F2,
+        KeyEvent::F3 => KeyCode::F3,
+        KeyEvent::F4 => KeyCode::F4,
+        KeyEvent::F5 => KeyCode::F5,
+        KeyEvent::ArrowUp => KeyCode::Up,
+        KeyEvent::ArrowDown => KeyCode::Down,
+        KeyEvent::ArrowLeft => KeyCode::Left,
+        KeyEvent::ArrowRight => KeyCode::Right,
+    }
+}
+
 /// Polls and decodes the next `KeyEvent` from the scancode queue.
 pub fn poll_key() -> Option<KeyEvent> {
+    let key = poll_key_internal()?;
+    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::KeyPress {
+        keycode: key_event_to_keycode(key),
+    });
+    Some(key)
+}
+
+/// Internal scancode decoder.
+fn poll_key_internal() -> Option<KeyEvent> {
     while let Some(code) = pop_scancode() {
         if code == 0xE0 {
             EXTENDED_ACTIVE.store(true, Ordering::Relaxed);
