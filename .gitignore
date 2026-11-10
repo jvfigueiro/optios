@@ -1,0 +1,10 @@
+/target
+/build
+/vendor
+*.iso
+*.img
+serial.log
+qemu.log
+screenshot.ppm
+screenshot.png
+

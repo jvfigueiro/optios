@@ -1,0 +1,13 @@
+[package]
+name = "optios-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+limine = "0.5.0"
+optios-ustar = { path = "../libs/ustar" }
+optios-ahci-proto = { path = "../libs/ahci-proto" }
+
+[features]
+default = []
+selftest = []
