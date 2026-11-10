@@ -5,7 +5,11 @@ members = [
     "libs/ahci-proto",
     "libs/partition-table",
     "libs/elf-loader",
+    "libs/ansi-parser",
+    "libs/opti-libc",
     "userland/sysinfo",
+    "userland/cat",
+    "userland/optifetch",
 ]
 resolver = "2"
 

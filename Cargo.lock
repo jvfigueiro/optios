@@ -22,6 +22,17 @@ name = "optios-ahci-proto"
 version = "0.1.0"
 
 [[package]]
+name = "optios-ansi-parser"
+version = "0.1.0"
+
+[[package]]
+name = "optios-cat"
+version = "0.1.0"
+dependencies = [
+ "optios-libc",
+]
+
+[[package]]
 name = "optios-elf-loader"
 version = "0.1.0"
 
@@ -31,9 +42,21 @@ version = "0.1.0"
 dependencies = [
  "limine",
  "optios-ahci-proto",
+ "optios-ansi-parser",
  "optios-elf-loader",
  "optios-partition-table",
  "optios-ustar",
+]
+
+[[package]]
+name = "optios-libc"
+version = "0.1.0"
+
+[[package]]
+name = "optios-optifetch"
+version = "0.1.0"
+dependencies = [
+ "optios-libc",
 ]
 
 [[package]]
@@ -43,6 +66,9 @@ version = "0.1.0"
 [[package]]
 name = "optios-sysinfo"
 version = "0.1.0"
+dependencies = [
+ "optios-libc",
+]
 
 [[package]]
 name = "optios-ustar"

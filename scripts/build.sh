@@ -43,14 +43,16 @@ fi
 
 echo "==> [OptiOS Build] Kernel compiled: ${KERNEL_BIN}"
 
-# 1.1 Compile Ring 3 Userland Utility (/bin/sysinfo)
+# 1.1 Compile Ring 3 Userland Utilities (/bin/sysinfo, /bin/cat, /bin/optifetch)
 echo "==> [OptiOS Build] Compiling Ring 3 userland utilities..."
 RUSTFLAGS="-C relocation-model=static -C link-arg=-Tuserland/linker.ld -C link-arg=-nostdlib -C link-arg=-static -C link-arg=-z -C link-arg=max-page-size=0x1000" \
-    cargo build --package optios-sysinfo --release --target "${TARGET}"
+    cargo build --package optios-sysinfo --package optios-cat --package optios-optifetch --release --target "${TARGET}"
 SYSINFO_BIN="${PROJECT_ROOT}/target/${TARGET}/release/optios-sysinfo"
+CAT_BIN="${PROJECT_ROOT}/target/${TARGET}/release/optios-cat"
+OPTIFETCH_BIN="${PROJECT_ROOT}/target/${TARGET}/release/optios-optifetch"
 
-if [ ! -f "${SYSINFO_BIN}" ]; then
-    echo "ERROR: Userland binary not found at ${SYSINFO_BIN}" >&2
+if [ ! -f "${SYSINFO_BIN}" ] || [ ! -f "${CAT_BIN}" ] || [ ! -f "${OPTIFETCH_BIN}" ]; then
+    echo "ERROR: Userland binaries not found at target directory" >&2
     exit 1
 fi
 
@@ -66,17 +68,19 @@ rm -rf "${INITRAMFS_STAGE}"
 mkdir -p "${INITRAMFS_STAGE}/etc" "${INITRAMFS_STAGE}/bin" "${INITRAMFS_STAGE}/usr/share/hwdata"
 
 cp "${SYSINFO_BIN}" "${INITRAMFS_STAGE}/bin/sysinfo"
+cp "${CAT_BIN}" "${INITRAMFS_STAGE}/bin/cat"
+cp "${OPTIFETCH_BIN}" "${INITRAMFS_STAGE}/bin/optifetch"
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/optios-release"
 NAME="OptiOS"
-VERSION="1.0.0-alpha (Milestone 7)"
+VERSION="1.0.0-alpha (Milestone 8)"
 ID=optios
 ARCH="x86_64"
 FIRMWARE="UEFI"
 BOOTLOADER="Limine v8.x"
-VFS_ROOT="USTAR Initramfs (Read-Only)"
+VFS_ROOT="USTAR Initramfs (Read-Only) + /proc"
 STORAGE_STACK="SATA AHCI 1.0 DMA + S.M.A.R.T. Telemetry"
-USERLAND="Ring 3 (Syscalls & ELF64)"
+USERLAND="Ring 3 (Syscalls, sys_brk alloc, argc/argv & ELF64)"
 EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/motd"
@@ -112,7 +116,9 @@ tar --format=ustar -cf "${ISO_ROOT}/boot/initramfs.tar" -C "${INITRAMFS_STAGE}" 
     etc/motd \
     etc/diag-manifest.conf \
     usr/share/hwdata/pci.ids \
-    bin/sysinfo
+    bin/sysinfo \
+    bin/cat \
+    bin/optifetch
 
 echo "==> [OptiOS Build] USTAR Initramfs created: ${ISO_ROOT}/boot/initramfs.tar"
 

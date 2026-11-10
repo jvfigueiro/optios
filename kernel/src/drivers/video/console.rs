@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::font::FONT_WIDTH;
 use super::framebuffer::with_framebuffer;
+use optios_ansi_parser::{AnsiAction, AnsiParser};
 
 pub const DEFAULT_FG: u32 = 0x00E2E8F0; // Crisp light gray / VT100
 pub const DEFAULT_BG: u32 = 0x00000000; // Classic terminal black
@@ -29,6 +30,8 @@ struct ConsoleState {
     rows: usize,
     fg_color: u32,
     bg_color: u32,
+    bold: bool,
+    ansi: AnsiParser,
     initialized: bool,
 }
 
@@ -39,6 +42,8 @@ static mut CONSOLE: ConsoleState = ConsoleState {
     rows: 50,
     fg_color: DEFAULT_FG,
     bg_color: DEFAULT_BG,
+    bold: false,
+    ansi: AnsiParser::new(),
     initialized: false,
 };
 
@@ -132,50 +137,94 @@ pub fn print_str(s: &str) {
 
     with_framebuffer(|fb| {
         unsafe {
-            for c in s.chars() {
-                match c {
-                    '\n' => {
-                        CONSOLE.cursor_x = 0;
-                        CONSOLE.cursor_y += 1;
-                        if CONSOLE.cursor_y >= CONSOLE.rows {
-                            fb.scroll_up(1, CONSOLE.bg_color);
-                            CONSOLE.cursor_y = CONSOLE.rows - 1;
+            let con = &raw mut CONSOLE;
+            for b in s.bytes() {
+                (*con).ansi.parse_byte(b, |action| match action {
+                    AnsiAction::Print(byte) => match byte {
+                        b'\n' => {
+                            (*con).cursor_x = 0;
+                            (*con).cursor_y += 1;
+                            if (*con).cursor_y >= (*con).rows {
+                                fb.scroll_up(1, (*con).bg_color);
+                                (*con).cursor_y = (*con).rows - 1;
+                            }
                         }
-                    }
-                    '\r' => {
-                        CONSOLE.cursor_x = 0;
-                    }
-                    '\x08' => {
-                        if CONSOLE.cursor_x > 0 {
-                            CONSOLE.cursor_x -= 1;
+                        b'\r' => {
+                            (*con).cursor_x = 0;
+                        }
+                        0x08 => {
+                            if (*con).cursor_x > 0 {
+                                (*con).cursor_x -= 1;
+                                fb.draw_char(
+                                    (*con).cursor_x * FONT_WIDTH,
+                                    (*con).cursor_y * 16,
+                                    ' ',
+                                    (*con).fg_color,
+                                    Some((*con).bg_color),
+                                );
+                            }
+                        }
+                        byte_val => {
+                            let ch = byte_val as char;
+                            let fg = if (*con).bold && (*con).fg_color == DEFAULT_FG {
+                                0x00FFFFFF // Bright white for bold default
+                            } else {
+                                (*con).fg_color
+                            };
+
                             fb.draw_char(
-                                CONSOLE.cursor_x * FONT_WIDTH,
-                                CONSOLE.cursor_y * 16,
+                                (*con).cursor_x * FONT_WIDTH,
+                                (*con).cursor_y * 16,
+                                ch,
+                                fg,
+                                Some((*con).bg_color),
+                            );
+                            (*con).cursor_x += 1;
+                            if (*con).cursor_x >= (*con).cols {
+                                (*con).cursor_x = 0;
+                                (*con).cursor_y += 1;
+                                if (*con).cursor_y >= (*con).rows {
+                                    fb.scroll_up(1, (*con).bg_color);
+                                    (*con).cursor_y = (*con).rows - 1;
+                                }
+                            }
+                        }
+                    },
+                    AnsiAction::SetFg(color) => {
+                        (*con).fg_color = color.to_rgb32(false);
+                    }
+                    AnsiAction::SetBg(color) => {
+                        (*con).bg_color = color.to_rgb32(true);
+                    }
+                    AnsiAction::SetBold(bold) => {
+                        (*con).bold = bold;
+                    }
+                    AnsiAction::ResetAttributes => {
+                        (*con).fg_color = DEFAULT_FG;
+                        (*con).bg_color = DEFAULT_BG;
+                        (*con).bold = false;
+                    }
+                    AnsiAction::ClearScreen => {
+                        (*con).cursor_x = 0;
+                        (*con).cursor_y = 0;
+                        fb.clear((*con).bg_color);
+                    }
+                    AnsiAction::ClearLine => {
+                        for c in (*con).cursor_x..(*con).cols {
+                            fb.draw_char(
+                                c * FONT_WIDTH,
+                                (*con).cursor_y * 16,
                                 ' ',
-                                CONSOLE.fg_color,
-                                Some(CONSOLE.bg_color),
+                                (*con).fg_color,
+                                Some((*con).bg_color),
                             );
                         }
                     }
-                    ch => {
-                        fb.draw_char(
-                            CONSOLE.cursor_x * FONT_WIDTH,
-                            CONSOLE.cursor_y * 16,
-                            ch,
-                            CONSOLE.fg_color,
-                            Some(CONSOLE.bg_color),
-                        );
-                        CONSOLE.cursor_x += 1;
-                        if CONSOLE.cursor_x >= CONSOLE.cols {
-                            CONSOLE.cursor_x = 0;
-                            CONSOLE.cursor_y += 1;
-                            if CONSOLE.cursor_y >= CONSOLE.rows {
-                                fb.scroll_up(1, CONSOLE.bg_color);
-                                CONSOLE.cursor_y = CONSOLE.rows - 1;
-                            }
-                        }
+                    AnsiAction::SetCursorPosition { row, col } => {
+                        (*con).cursor_y = row.min((*con).rows.saturating_sub(1));
+                        (*con).cursor_x = col.min((*con).cols.saturating_sub(1));
                     }
-                }
+                });
             }
             fb.present();
         }

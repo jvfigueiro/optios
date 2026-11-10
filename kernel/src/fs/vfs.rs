@@ -11,9 +11,28 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
+use crate::fs::proc::{self, ProcFileType};
 use crate::fs::tarfs;
 use crate::posix::errno::{Errno, KernelResult};
 use crate::{info, warn};
+
+pub const PROC_FD_BASE: usize = 0x8000_0000;
+
+struct OpenProc {
+    content: Vec<u8>,
+}
+
+struct ProcTable {
+    procs: UnsafeCell<Vec<Option<OpenProc>>>,
+    lock: AtomicBool,
+}
+
+unsafe impl Sync for ProcTable {}
+
+static PROC_TABLE: ProcTable = ProcTable {
+    procs: UnsafeCell::new(Vec::new()),
+    lock: AtomicBool::new(false),
+};
 
 /// Type of a node in the Virtual File System.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +123,39 @@ pub fn init(archive_opt: Option<(&'static str, &'static [u8])>) -> usize {
 
 /// Opens a file by path in Read-Only mode and returns its descriptor index (`fd`).
 pub fn open(path: &str) -> KernelResult<usize> {
+    if path == "/proc" || path == "/proc/" {
+        return Err(Errno::EISDIR);
+    }
+
+    if let Some(proc_file) = ProcFileType::from_path(path) {
+        let content = proc::generate_proc_content(proc_file).into_bytes();
+        while PROC_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let procs = unsafe { &mut *PROC_TABLE.procs.get() };
+        let mut found_idx = None;
+        for (i, slot) in procs.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(OpenProc { content: content.clone() });
+                found_idx = Some(i);
+                break;
+            }
+        }
+        let idx = match found_idx {
+            Some(i) => i,
+            None => {
+                procs.push(Some(OpenProc { content }));
+                procs.len() - 1
+            }
+        };
+        PROC_TABLE.lock.store(false, Ordering::Release);
+        return Ok(PROC_FD_BASE + idx);
+    }
+
     let canonical = tarfs::normalize_path("", path)?;
     with_vfs(|nodes| {
         for (idx, node) in nodes.iter().enumerate() {
@@ -118,8 +170,57 @@ pub fn open(path: &str) -> KernelResult<usize> {
     })
 }
 
+/// Closes an open file descriptor.
+pub fn close(fd: usize) -> KernelResult<()> {
+    if fd >= PROC_FD_BASE {
+        let idx = fd - PROC_FD_BASE;
+        while PROC_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let procs = unsafe { &mut *PROC_TABLE.procs.get() };
+        if let Some(slot) = procs.get_mut(idx) {
+            *slot = None;
+        }
+        PROC_TABLE.lock.store(false, Ordering::Release);
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
 /// Reads up to `buf.len()` bytes from an open file descriptor `fd` starting at `offset`.
 pub fn read(fd: usize, offset: usize, buf: &mut [u8]) -> KernelResult<usize> {
+    if fd >= PROC_FD_BASE {
+        let idx = fd - PROC_FD_BASE;
+        while PROC_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let procs = unsafe { &*PROC_TABLE.procs.get() };
+        let res = match procs.get(idx).and_then(|opt| opt.as_ref()) {
+            Some(open_proc) => {
+                if offset >= open_proc.content.len() {
+                    Ok(0)
+                } else {
+                    let available = open_proc.content.len() - offset;
+                    let to_copy = available.min(buf.len());
+                    buf[..to_copy].copy_from_slice(&open_proc.content[offset..offset + to_copy]);
+                    Ok(to_copy)
+                }
+            }
+            None => Err(Errno::EBADF),
+        };
+        PROC_TABLE.lock.store(false, Ordering::Release);
+        return res;
+    }
+
     with_vfs(|nodes| {
         let node = nodes.get(fd).ok_or(Errno::EBADF)?;
         if node.file_type == FileType::Directory {
@@ -137,6 +238,25 @@ pub fn read(fd: usize, offset: usize, buf: &mut [u8]) -> KernelResult<usize> {
 
 /// Retrieves metadata (`VfsStat`) for the given path.
 pub fn stat(path: &str) -> KernelResult<VfsStat> {
+    if path == "/proc" || path == "/proc/" {
+        return Ok(VfsStat {
+            path: String::from("/proc"),
+            file_type: FileType::Directory,
+            size: 0,
+            mode: 0o555,
+        });
+    }
+
+    if let Some(proc_file) = ProcFileType::from_path(path) {
+        let content = proc::generate_proc_content(proc_file);
+        return Ok(VfsStat {
+            path: String::from(proc_file.path()),
+            file_type: FileType::RegularFile,
+            size: content.len(),
+            mode: 0o444,
+        });
+    }
+
     let canonical = if path == "/" {
         String::from("/")
     } else {
@@ -168,6 +288,22 @@ pub fn stat(path: &str) -> KernelResult<VfsStat> {
 
 /// Lists entries mounted in the VFS under `dir_path` (use `"/"` to list all mounted initramfs nodes).
 pub fn list_dir(dir_path: &str) -> KernelResult<Vec<VfsStat>> {
+    if dir_path == "/proc" || dir_path == "/proc/" {
+        let mut results = Vec::new();
+        for (p, _) in proc::get_proc_file_list() {
+            if let Some(proc_file) = ProcFileType::from_path(p) {
+                let sz = proc::generate_proc_content(proc_file).len();
+                results.push(VfsStat {
+                    path: String::from(p),
+                    file_type: FileType::RegularFile,
+                    size: sz,
+                    mode: 0o444,
+                });
+            }
+        }
+        return Ok(results);
+    }
+
     let canonical = if dir_path == "/" {
         String::from("/")
     } else {
@@ -190,11 +326,39 @@ pub fn list_dir(dir_path: &str) -> KernelResult<Vec<VfsStat>> {
                 });
             }
         }
+        if canonical == "/" {
+            results.push(VfsStat {
+                path: String::from("/proc"),
+                file_type: FileType::Directory,
+                size: 0,
+                mode: 0o555,
+            });
+        }
         if results.is_empty() && canonical != "/" {
             return Err(Errno::ENOENT);
         }
         Ok(results)
     })
+}
+
+/// Returns the total size of an open file descriptor.
+pub fn file_size(fd: usize) -> Option<usize> {
+    if fd >= PROC_FD_BASE {
+        let idx = fd - PROC_FD_BASE;
+        while PROC_TABLE
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let procs = unsafe { &*PROC_TABLE.procs.get() };
+        let sz = procs.get(idx).and_then(|opt| opt.as_ref()).map(|p| p.content.len());
+        PROC_TABLE.lock.store(false, Ordering::Release);
+        sz
+    } else {
+        with_vfs(|nodes| nodes.get(fd).map(|n| n.size))
+    }
 }
 
 /// Helper that opens, stats, and reads an entire text file into a `String` using the POSIX VFS API.

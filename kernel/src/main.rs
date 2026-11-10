@@ -3,8 +3,8 @@
 // Item: Kernel Main Entry Point (_start) & Text Console Boot
 // Date: 2026-11-10
 
-//! OptiOS Kernel Main Entry Point (_start) — Milestone 7:
-//! Fullscreen Classical Text Console (/dev/tty0 Style), Ring 3 Userland, POSIX Syscalls & ELF64 Loader.
+//! OptiOS Kernel Main Entry Point (_start) — Milestone 8:
+//! POSIX Userland Expansion, sys_brk, /proc & optifetch.
 
 #![no_std]
 #![no_main]
@@ -51,7 +51,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     info!("========================================================");
-    info!("OptiOS Kernel — Milestone 7: Pure Console, Ring 3, Syscalls & ELF64 Loader");
+    info!("OptiOS Kernel — Milestone 8: POSIX Userland, sys_brk, /proc & optifetch");
     info!("========================================================");
 
     // 2. Validate Limine Base Revision Protocol Handshake
@@ -256,8 +256,13 @@ pub extern "C" fn _start() -> ! {
             );
         }
 
-        // Syscall / Userland Selftest
-        info!("Syscall Selftest: Spawning Ring 3 userland binary '/bin/sysinfo'...");
+        // Syscall / Userland Selftest with Zero-Leak Verification
+        // Note: First invocation populates intermediate paging structures (PDPT/PD/PT)
+        // in the PML4 table. Subsequent runs must exhibit zero PMM frame delta.
+        let _ = syscall::loader::spawn_user_process("/bin/sysinfo");
+
+        let free_before = pmm::get_stats().free_frames;
+        info!("Syscall Selftest: Spawning Ring 3 userland binary '/bin/sysinfo' (reference free frames: {})...", free_before);
         match syscall::loader::spawn_user_process("/bin/sysinfo") {
             Ok(code) => {
                 info!("Syscall Selftest: '/bin/sysinfo' executed in Ring 3, exit status {} -> PASS", code);
@@ -266,6 +271,14 @@ pub extern "C" fn _start() -> ! {
                 error!("Syscall Selftest: '/bin/sysinfo' failed: {} -> FAIL", e);
             }
         }
+        let free_after = pmm::get_stats().free_frames;
+        info!(
+            "Memory Leak Selftest: PMM free frames: before={}, after={} (delta={}) -> {}",
+            free_before,
+            free_after,
+            free_after as i64 - free_before as i64,
+            if free_before == free_after { "PASS (Zero Leaks)" } else { "FAIL (Leak detected)" }
+        );
     }
 
     // 18. Initialize Shell Session

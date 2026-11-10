@@ -5,10 +5,12 @@
 
 //! Userland Process Spawner for OptiOS.
 //! Loads ELF64 executables from the VFS, maps segments into user-accessible virtual pages,
-//! establishes a dedicated 16 KiB user stack, and performs Ring 0 -> Ring 3 transitions.
+//! sets up a dedicated 16 KiB user stack with POSIX argc/argv System V ABI conventions,
+//! manages dynamic program break (heap), and performs Ring 0 -> Ring 3 transitions.
 
 extern crate alloc;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::fs::vfs;
 use crate::mm::{pmm, vmm};
@@ -17,9 +19,42 @@ use optios_elf_loader::parse_elf;
 pub const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_0000;
 pub const USER_STACK_PAGES: u64 = 4; // 16 KiB stack
 
+/// Memory tracking descriptor for the currently active userland process.
+pub struct ProcessMemory {
+    pub user_pages: Vec<(u64, u64)>, // (vaddr, paddr)
+    pub heap_start: u64,
+    pub heap_current: u64,
+    pub heap_max: u64,
+}
+
+pub static mut CURRENT_PROCESS: Option<ProcessMemory> = None;
+
+/// Frees all physical frames and unmaps virtual pages allocated to the active process.
+pub fn clean_current_process() {
+    unsafe {
+        let proc_ptr = &raw mut CURRENT_PROCESS;
+        let proc_opt = (*proc_ptr).take();
+        if let Some(proc) = proc_opt {
+            for (vaddr, paddr) in proc.user_pages {
+                let _ = vmm::unmap_page(vaddr);
+                pmm::free_frame(paddr);
+            }
+        }
+        super::reset_user_fds();
+    }
+}
+
 /// Spawns an ELF64 binary from the given VFS path and executes it in Ring 3.
 /// Returns the process exit status upon completion.
 pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
+    spawn_user_process_with_args(path, &[path])
+}
+
+/// Spawns an ELF64 binary with command-line arguments and executes it in Ring 3.
+pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'static str> {
+    // 0. Clean any remnant process resources
+    clean_current_process();
+
     // 1. Stat file from VFS to obtain size
     let stat = vfs::stat(path).map_err(|_| "Executable not found in VFS")?;
 
@@ -29,9 +64,20 @@ pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
     // 3. Read full ELF file from VFS into temporary buffer
     let mut elf_data = vec![0u8; stat.size];
     vfs::read(fd, 0, &mut elf_data).map_err(|_| "Failed to read executable file")?;
+    let _ = vfs::close(fd);
 
     // 4. Parse and strictly validate ELF64 headers and segments
     let elf = parse_elf(&elf_data).map_err(|_| "Invalid or corrupted ELF64 executable")?;
+
+    let mut user_pages: Vec<(u64, u64)> = Vec::new();
+    let mut max_vaddr = 0u64;
+
+    for seg in &elf.segments {
+        let end = seg.vaddr + seg.mem_size;
+        if end > max_vaddr {
+            max_vaddr = end;
+        }
+    }
 
     // 5. Map each PT_LOAD segment into user space
     let page_flags = vmm::flags::PRESENT | vmm::flags::WRITABLE | vmm::flags::USER_ACCESSIBLE;
@@ -44,7 +90,10 @@ pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
         while curr_vaddr < vaddr_end {
             let paddr = match pmm::alloc_frame() {
                 Some(p) => p,
-                None => return Err("Out of physical memory allocating user segment frame"),
+                None => {
+                    clean_current_process();
+                    return Err("Out of physical memory allocating user segment frame");
+                }
             };
 
             let frame_ptr = vmm::phys_to_virt::<u8>(paddr);
@@ -53,9 +102,12 @@ pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
             }
 
             if let Err(e) = vmm::map_page(curr_vaddr, paddr, page_flags) {
+                pmm::free_frame(paddr);
+                clean_current_process();
                 return Err(e);
             }
 
+            user_pages.push((curr_vaddr, paddr));
             curr_vaddr += 4096;
         }
 
@@ -69,13 +121,21 @@ pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
         }
     }
 
-    // 5. Allocate and map 16 KiB User Stack
+    // 6. Define dynamic heap boundaries (page-aligned right after highest PT_LOAD segment)
+    let heap_start = (max_vaddr + 0xFFF) & !0xFFF;
+    let heap_current = heap_start;
+    let heap_max = heap_start + (16 * 1024 * 1024); // 16 MiB user heap limit
+
+    // 7. Allocate and map 16 KiB User Stack
     let stack_base = USER_STACK_TOP - (USER_STACK_PAGES * 4096);
     for i in 0..USER_STACK_PAGES {
         let page_vaddr = stack_base + (i * 4096);
         let paddr = match pmm::alloc_frame() {
             Some(p) => p,
-            None => return Err("Out of physical memory allocating user stack frame"),
+            None => {
+                clean_current_process();
+                return Err("Out of physical memory allocating user stack frame");
+            }
         };
 
         let frame_ptr = vmm::phys_to_virt::<u8>(paddr);
@@ -84,19 +144,93 @@ pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
         }
 
         if let Err(e) = vmm::map_page(page_vaddr, paddr, page_flags) {
+            pmm::free_frame(paddr);
+            clean_current_process();
             return Err(e);
         }
+
+        user_pages.push((page_vaddr, paddr));
     }
 
-    // 6. Enter Ring 3 and execute user code
-    let exit_status = unsafe { enter_user_mode(elf.entry_point, USER_STACK_TOP) };
+    // 8. Setup POSIX System V AMD64 ABI argc/argv layout on User Stack
+    let mut sp = USER_STACK_TOP;
+    let mut arg_ptrs: Vec<u64> = Vec::new();
+
+    // Place argument string data (null-terminated)
+    for arg in args {
+        let bytes = arg.as_bytes();
+        let len = bytes.len() + 1;
+        sp -= len as u64;
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), sp as *mut u8, bytes.len());
+            *((sp + bytes.len() as u64) as *mut u8) = 0;
+        }
+        arg_ptrs.push(sp);
+    }
+
+    // 16-byte align before pointer tables
+    sp &= !0x0F;
+
+    // NULL sentinel terminating argv array
+    sp -= 8;
+    unsafe {
+        *(sp as *mut u64) = 0;
+    }
+
+    // Push argv pointers in reverse order
+    for &ptr in arg_ptrs.iter().rev() {
+        sp -= 8;
+        unsafe {
+            *(sp as *mut u64) = ptr;
+        }
+    }
+    let argv_ptr = sp;
+
+    // Push argc
+    sp -= 8;
+    unsafe {
+        *(sp as *mut u64) = args.len() as u64;
+    }
+
+    // Maintain 16-byte alignment
+    if (sp & 0x0F) != 0 {
+        sp -= 8;
+    }
+
+    // 9. Register active process memory tracking
+    unsafe {
+        CURRENT_PROCESS = Some(ProcessMemory {
+            user_pages,
+            heap_start,
+            heap_current,
+            heap_max,
+        });
+    }
+
+    // 10. Enter Ring 3 and execute user code
+    let exit_status = unsafe {
+        enter_user_mode(
+            elf.entry_point,
+            sp,
+            args.len() as u64,
+            argv_ptr,
+        )
+    };
     crate::arch::x86_64::sti();
+
+    // 11. Clean all allocated frames and unmap user pages
+    clean_current_process();
 
     Ok(exit_status)
 }
 
 #[unsafe(naked)]
-unsafe extern "C" fn enter_user_mode(entry: u64, user_stack: u64) -> i32 {
+unsafe extern "C" fn enter_user_mode(
+    entry: u64,
+    user_stack: u64,
+    argc: u64,
+    argv: u64,
+) -> i32 {
     core::arch::naked_asm!(
         // Save kernel registers
         "mov qword ptr [rip + {SAVED_RSP}], rsp",
@@ -109,10 +243,10 @@ unsafe extern "C" fn enter_user_mode(entry: u64, user_stack: u64) -> i32 {
 
         // Build iretq stack frame:
         // SS = User Data (0x18 | 3 = 0x1B)
-        // RSP = user_stack
+        // RSP = user_stack (passed in rsi)
         // RFLAGS = 0x202 (IF enabled)
         // CS = User Code (0x20 | 3 = 0x23)
-        // RIP = entry
+        // RIP = entry (passed in rdi)
         "push 0x1B",
         "push rsi",
         "push 0x202",
@@ -125,6 +259,12 @@ unsafe extern "C" fn enter_user_mode(entry: u64, user_stack: u64) -> i32 {
         "mov es, ax",
         "mov fs, ax",
         "mov gs, ax",
+
+        // Pass argc in RDI and argv in RSI for userland _start
+        "mov rdi, rdx",
+        "mov rsi, rcx",
+        "xor rdx, rdx",
+        "xor rcx, rcx",
 
         "iretq",
 

@@ -20,21 +20,25 @@ The kernel is structured in modular layers with strict boundaries:
 ```
 +--------------------------------------------------------+
 |                     User Space                         |
-|     (Unprivileged Ring 3: /bin/sysinfo, ELF64 tools)   |
+|     (Unprivileged Ring 3: /bin/optifetch, /bin/cat,    |
+|      /bin/sysinfo, libs/opti-libc dynamic brk heap)    |
 +--------------------------------------------------------+
                            |
-                           v  (POSIX System Calls: SYS_READ, WRITE, OPEN, STAT, EXIT, UNAME)
+                           v  (POSIX System Calls: SYS_READ, WRITE, OPEN, CLOSE, STAT, LSEEK, BRK, GETPID, EXIT, UNAME)
 +--------------------------------------------------------+
 |             Interactive Shell & Terminal               |
-|     - opti-sh: Prompt 'optios - # ', 13 Commands       |
+|     - opti-sh: Prompt 'optios - # ', argc/argv exec    |
 |     - Fullscreen Text Console (/dev/tty0 Style)        |
+|     - ANSI / VT100 SGR & Cursor Parser (libs/ansi)     |
 |     - Hardware / Software Video Scrolling & dmesg      |
 +--------------------------------------------------------+
 |              POSIX & Virtual File System               |
 |     - POSIX.1-2024 Errno & KernelResult<T>             |
 |     - Virtual File System (vfs::open/read/stat/ls)     |
+|     - Virtual Telemetry Filesystem (/proc)             |
 |     - USTAR Initramfs Driver (libs/ustar at /)         |
 |     - ELF64 Binary Loader (libs/elf-loader)            |
+|     - User FD Table (3..16) & sys_lseek offsets        |
 +--------------------------------------------------------+
 |             Storage & Partition Management             |
 |     - BlockDevice Trait (libs/ahci-proto)              |
@@ -46,6 +50,8 @@ The kernel is structured in modular layers with strict boundaries:
 |     - Physical Memory Manager (PMM - Bitmap)           |
 |     - Virtual Memory / 4-Level Paging (VMM + MMIO)     |
 |     - User-Accessible Page Table Propagation           |
+|     - Dynamic User Heap (sys_brk 0x0080_0000..16 MiB)  |
+|     - Process Memory Tracker & Zero-Leak Reclamation   |
 |     - IrqSafe Kernel Heap Allocator (Rust alloc)       |
 |     - Video RAM Backbuffer (0xFFFF_D800_0000_0000)     |
 +--------------------------------------------------------+

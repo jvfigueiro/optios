@@ -1,9 +1,10 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Filesystem & VFS Subsystem Module
-// Date: 2026-11-09
+// Date: 2026-11-10
 
-//! Virtual File System (VFS) and filesystem drivers (USTAR Initramfs).
+//! Virtual File System (VFS) and filesystem drivers (USTAR Initramfs, /proc).
 
+pub mod proc;
 pub mod tarfs;
 pub mod vfs;

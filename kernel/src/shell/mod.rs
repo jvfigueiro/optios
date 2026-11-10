@@ -106,7 +106,13 @@ impl Shell {
             "help" => self.cmd_help(),
             "uname" | "ver" => self.cmd_uname(&args),
             "ls" => self.cmd_ls(&args),
-            "cat" => self.cmd_cat(&args),
+            "cat" => {
+                if vfs::open("/bin/cat").is_ok() {
+                    self.cmd_external(cmd, &args);
+                } else {
+                    self.cmd_cat(&args);
+                }
+            }
             "stat" => self.cmd_stat(&args),
             "lspci" => self.cmd_lspci(),
             "lsblk" => self.cmd_lsblk(),
@@ -422,7 +428,7 @@ impl Shell {
         ));
     }
 
-    fn cmd_external(&self, cmd: &str, _args: &[&str]) {
+    fn cmd_external(&self, cmd: &str, args: &[&str]) {
         let target_path = if cmd.starts_with('/') {
             String::from(cmd)
         } else {
@@ -434,8 +440,23 @@ impl Shell {
                 "[opti-sh] Executing ELF64 binary '{}' in Ring 3 (Userland)...",
                 target_path
             ));
-            match crate::syscall::loader::spawn_user_process(&target_path) {
+            let mut full_args = Vec::new();
+            full_args.push(target_path.as_str());
+            full_args.extend_from_slice(args);
+
+            let free_before = crate::mm::pmm::get_stats().free_frames;
+
+            match crate::syscall::loader::spawn_user_process_with_args(&target_path, &full_args) {
                 Ok(status) => {
+                    let free_after = crate::mm::pmm::get_stats().free_frames;
+                    info!(
+                        "[opti-sh] '{}' exited status {}: PMM free frames before={}, after={} (zero leak: {})",
+                        target_path,
+                        status,
+                        free_before,
+                        free_after,
+                        free_before == free_after
+                    );
                     if status != 0 {
                         self.println(&format!("[opti-sh] Process exited with status {}", status));
                     }

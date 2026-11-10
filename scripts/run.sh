@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OptiOS
 # Copyright (C) 2026 João Figueiró. All rights reserved
-# Item: QEMU Q35 + OVMF Execution & Automated Milestone 7 Verification Script
+# Item: QEMU Q35 + OVMF Execution & Automated Milestone 8 Verification Script
 # Date: 2026-11-10
 
 set -euo pipefail
@@ -20,6 +20,8 @@ SCREENSHOT_TAB4_PPM="${BUILD_DIR}/screenshot_m5_tab4.ppm"
 SCREENSHOT_TAB4_PNG="${BUILD_DIR}/screenshot_m5_tab4.png"
 SCREENSHOT_TAB5_PPM="${BUILD_DIR}/screenshot_m6_tab5_shell.ppm"
 SCREENSHOT_TAB5_PNG="${BUILD_DIR}/screenshot_m6_tab5_shell.png"
+SCREENSHOT_M8_PPM="${BUILD_DIR}/screenshot_m8.ppm"
+SCREENSHOT_M8_PNG="${BUILD_DIR}/screenshot_m8.png"
 SOCK="/tmp/qemu-optios-$$.sock"
 
 MODE="${1:---gui}"
@@ -71,23 +73,18 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
     sock.connect('${SOCK}')
     time.sleep(0.3)
-    # Send interactive command: lsblk
-    for k in ['l', 's', 'b', 'l', 'k', 'ret']:
+    # Send interactive command: optifetch (Ring 3 fastfetch with sys_brk & ANSI colors)
+    for k in ['o', 'p', 't', 'i', 'f', 'e', 't', 'c', 'h', 'ret']:
         sock.sendall(f'sendkey {k}\n'.encode())
         time.sleep(0.08)
-    time.sleep(0.4)
-    # Send interactive command: lspci
-    for k in ['l', 's', 'p', 'c', 'i', 'ret']:
+    time.sleep(0.8)
+    # Send interactive command: /bin/cat /proc/meminfo
+    for k in ['slash', 'b', 'i', 'n', 'slash', 'c', 'a', 't', 'spc', 'slash', 'p', 'r', 'o', 'c', 'slash', 'm', 'e', 'm', 'i', 'n', 'f', 'o', 'ret']:
         sock.sendall(f'sendkey {k}\n'.encode())
         time.sleep(0.08)
-    time.sleep(0.4)
-    # Send interactive command: sysinfo (Ring 3 userland binary)
-    for k in ['s', 'y', 's', 'i', 'n', 'f', 'o', 'ret']:
-        sock.sendall(f'sendkey {k}\n'.encode())
-        time.sleep(0.08)
-    time.sleep(0.6)
+    time.sleep(0.8)
     # Capture Fullscreen Text Console screendump
-    sock.sendall(b'screendump ${SCREENSHOT_TAB5_PPM}\n')
+    sock.sendall(b'screendump ${SCREENSHOT_M8_PPM}\n')
     time.sleep(0.3)
     sock.sendall(b'screendump ${SCREENSHOT_PPM}\n')
     time.sleep(0.3)
@@ -107,8 +104,8 @@ finally:
     cat "${SERIAL_LOG}"
     echo "--------------------------------------------------------"
 
-    # Objective compliance assertions for Milestone 7
-    grep -q "OptiOS Kernel — Milestone 7: Pure Console, Ring 3, Syscalls & ELF64 Loader" "${SERIAL_LOG}" || { echo "FAILURE: Milestone 7 boot banner missing"; exit 1; }
+    # Objective compliance assertions for Milestone 8
+    grep -q "OptiOS Kernel — Milestone 8: POSIX Userland, sys_brk, /proc & optifetch" "${SERIAL_LOG}" || { echo "FAILURE: Milestone 8 boot banner missing"; exit 1; }
     grep -q "Limine Protocol: Base revision handshake successful." "${SERIAL_LOG}" || { echo "FAILURE: Limine protocol handshake missing"; exit 1; }
     grep -q "VFS initialized: Mounted USTAR initramfs" "${SERIAL_LOG}" || { echo "FAILURE: VFS USTAR initramfs mount missing"; exit 1; }
     grep -q "AHCI Controller" "${SERIAL_LOG}" || { echo "FAILURE: SATA AHCI controller initialization missing"; exit 1; }
@@ -116,23 +113,25 @@ finally:
     grep -q "Syscall subsystem initialized" "${SERIAL_LOG}" || { echo "FAILURE: Syscall subsystem initialization missing"; exit 1; }
     grep -q "OptiOS 1.0" "${SERIAL_LOG}" || { echo "FAILURE: OptiOS 1.0 MOTD header missing"; exit 1; }
     grep -q "Copyright (C) 2026 Joao Figueiro" "${SERIAL_LOG}" || { echo "FAILURE: Copyright MOTD missing"; exit 1; }
-    grep -q "opti-sh: Executing command 'lsblk'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of 'lsblk' missing"; exit 1; }
-    grep -q "opti-sh: Executing command 'lspci'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of 'lspci' missing"; exit 1; }
-    grep -q "opti-sh: Executing command 'sysinfo'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of 'sysinfo' missing"; exit 1; }
-    grep -q "\[sysinfo\] Hello from Userland (Ring 3)!" "${SERIAL_LOG}" || { echo "FAILURE: Ring 3 userland binary execution missing"; exit 1; }
-    grep -q "\[sysinfo\] Process PID: 1" "${SERIAL_LOG}" || { echo "FAILURE: SYS_GETPID output missing"; exit 1; }
-    grep -q "\[sysinfo\] System Name: OptiOS" "${SERIAL_LOG}" || { echo "FAILURE: SYS_UNAME output missing"; exit 1; }
+    grep -q "opti-sh: Executing command 'optifetch'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of 'optifetch' missing"; exit 1; }
+    grep -q "Executing ELF64 binary '/bin/optifetch' in Ring 3" "${SERIAL_LOG}" || { echo "FAILURE: optifetch Ring 3 execution missing"; exit 1; }
+    grep -q "root.*@.*optios" "${SERIAL_LOG}" || { echo "FAILURE: optifetch output missing"; exit 1; }
+    grep -q "opti-sh: Executing command '/bin/cat /proc/meminfo'" "${SERIAL_LOG}" || { echo "FAILURE: opti-sh execution of '/bin/cat /proc/meminfo' missing"; exit 1; }
+    grep -q "Executing ELF64 binary '/bin/cat' in Ring 3" "${SERIAL_LOG}" || { echo "FAILURE: /bin/cat Ring 3 execution missing"; exit 1; }
+    grep -q "MemTotal:" "${SERIAL_LOG}" || { echo "FAILURE: /proc/meminfo MemTotal missing"; exit 1; }
+    grep -q "MemFree:" "${SERIAL_LOG}" || { echo "FAILURE: /proc/meminfo MemFree missing"; exit 1; }
+    grep -q "zero leak: true" "${SERIAL_LOG}" || { echo "FAILURE: Zero memory leak verification missing"; exit 1; }
 
     # Convert screendumps if available
-    if [ -f "${SCREENSHOT_TAB5_PPM}" ]; then
-        echo "==> [OptiOS Test] Screendump PPM generated (${SCREENSHOT_TAB5_PPM}). Converting to PNG..."
-        python3 "${PROJECT_ROOT}/scripts/ppm2png.py" "${SCREENSHOT_TAB5_PPM}" "${SCREENSHOT_TAB5_PNG}" || true
+    if [ -f "${SCREENSHOT_M8_PPM}" ]; then
+        echo "==> [OptiOS Test] Screendump PPM generated (${SCREENSHOT_M8_PPM}). Converting to PNG..."
+        python3 "${PROJECT_ROOT}/scripts/ppm2png.py" "${SCREENSHOT_M8_PPM}" "${SCREENSHOT_M8_PNG}" || true
     fi
     if [ -f "${SCREENSHOT_PPM}" ]; then
         python3 "${PROJECT_ROOT}/scripts/ppm2png.py" "${SCREENSHOT_PPM}" "${SCREENSHOT_PNG}" || true
     fi
 
-    echo "==> [OptiOS Test] Milestone 7 Automated Verification: PASSED SUCCESSFULLY!"
+    echo "==> [OptiOS Test] Milestone 8 Automated Verification: PASSED SUCCESSFULLY!"
 else
     echo "==> [OptiOS Run] Launching QEMU (Q35 chipset + AHCI SSD) with serial forwarded to stdio..."
     qemu-system-x86_64 \

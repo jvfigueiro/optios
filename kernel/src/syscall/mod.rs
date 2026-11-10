@@ -28,11 +28,44 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_STAT: u64 = 4;
+pub const SYS_LSEEK: u64 = 8;
+pub const SYS_BRK: u64 = 12;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_UNAME: u64 = 63;
 
 const USER_SPACE_LIMIT: u64 = 0x0000_8000_0000_0000;
+
+pub const SEEK_SET: u64 = 0;
+pub const SEEK_CUR: u64 = 1;
+pub const SEEK_END: u64 = 2;
+
+const MAX_USER_FDS: usize = 32;
+
+#[derive(Clone, Copy)]
+struct UserFileDescriptor {
+    vfs_fd: usize,
+    offset: usize,
+    is_open: bool,
+}
+
+static mut USER_FD_TABLE: [UserFileDescriptor; MAX_USER_FDS] = [UserFileDescriptor {
+    vfs_fd: 0,
+    offset: 0,
+    is_open: false,
+}; MAX_USER_FDS];
+
+/// Closes all active user file descriptors and resets the process file table.
+pub fn reset_user_fds() {
+    unsafe {
+        for i in 3..MAX_USER_FDS {
+            if USER_FD_TABLE[i].is_open {
+                let _ = vfs::close(USER_FD_TABLE[i].vfs_fd);
+                USER_FD_TABLE[i].is_open = false;
+            }
+        }
+    }
+}
 
 #[repr(C)]
 pub struct UtsName {
@@ -166,6 +199,8 @@ pub extern "C" fn syscall_dispatch(
         SYS_OPEN => sys_open(arg1 as *const u8, arg2, arg3),
         SYS_CLOSE => sys_close(arg1),
         SYS_STAT => sys_stat(arg1 as *const u8, arg2 as *mut u8),
+        SYS_LSEEK => sys_lseek(arg1, arg2 as i64, arg3),
+        SYS_BRK => sys_brk(arg1),
         SYS_GETPID => sys_getpid(),
         SYS_EXIT => sys_exit(arg1 as i32),
         SYS_UNAME => sys_uname(arg1 as *mut UtsName),
@@ -198,12 +233,25 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
         }
         bytes_read as i64
     } else {
-        // Read from VFS node
-        let node_index = (fd - 3) as usize;
-        let mut slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
-        match vfs::read(node_index, 0, &mut slice) {
-            Ok(n) => n as i64,
-            Err(e) => -(e as i64),
+        let fd_idx = fd as usize;
+        if fd_idx < 3 || fd_idx >= MAX_USER_FDS {
+            return -9; // -EBADF
+        }
+
+        unsafe {
+            let fd_entry = &mut USER_FD_TABLE[fd_idx];
+            if !fd_entry.is_open {
+                return -9; // -EBADF
+            }
+
+            let mut slice = core::slice::from_raw_parts_mut(buf, count);
+            match vfs::read(fd_entry.vfs_fd, fd_entry.offset, &mut slice) {
+                Ok(n) => {
+                    fd_entry.offset += n;
+                    n as i64
+                }
+                Err(e) => -(e as i64),
+            }
         }
     }
 }
@@ -248,14 +296,135 @@ fn sys_open(path_ptr: *const u8, _flags: u64, _mode: u64) -> i64 {
         Err(_) => return -22, // -EINVAL
     };
 
+    // Find free user file descriptor slot (>= 3)
+    let mut free_fd = None;
+    unsafe {
+        for i in 3..MAX_USER_FDS {
+            if !USER_FD_TABLE[i].is_open {
+                free_fd = Some(i);
+                break;
+            }
+        }
+    }
+
+    let Some(fd) = free_fd else {
+        return -24; // -EMFILE (Too many open files)
+    };
+
     match vfs::open(path) {
-        Ok(node_idx) => (node_idx + 3) as i64, // Map node index to fd >= 3
+        Ok(vfs_fd) => {
+            unsafe {
+                USER_FD_TABLE[fd] = UserFileDescriptor {
+                    vfs_fd,
+                    offset: 0,
+                    is_open: true,
+                };
+            }
+            fd as i64
+        }
         Err(e) => -(e as i64),
     }
 }
 
-fn sys_close(_fd: u64) -> i64 {
-    0
+fn sys_close(fd: u64) -> i64 {
+    let fd_idx = fd as usize;
+    if fd_idx < 3 || fd_idx >= MAX_USER_FDS {
+        return -9; // -EBADF
+    }
+
+    unsafe {
+        let fd_entry = &mut USER_FD_TABLE[fd_idx];
+        if !fd_entry.is_open {
+            return -9; // -EBADF
+        }
+        let _ = vfs::close(fd_entry.vfs_fd);
+        fd_entry.is_open = false;
+        0
+    }
+}
+
+fn sys_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
+    let fd_idx = fd as usize;
+    if fd_idx < 3 || fd_idx >= MAX_USER_FDS {
+        return -9; // -EBADF
+    }
+
+    unsafe {
+        let fd_entry = &mut USER_FD_TABLE[fd_idx];
+        if !fd_entry.is_open {
+            return -9; // -EBADF
+        }
+
+        let cur_off = fd_entry.offset as i64;
+        let new_off = match whence {
+            SEEK_SET => offset,
+            SEEK_CUR => cur_off + offset,
+            SEEK_END => {
+                let sz = vfs::file_size(fd_entry.vfs_fd).unwrap_or(0) as i64;
+                sz + offset
+            }
+            _ => return -22, // -EINVAL
+        };
+
+        if new_off < 0 {
+            return -22; // -EINVAL
+        }
+
+        fd_entry.offset = new_off as usize;
+        new_off
+    }
+}
+
+fn sys_brk(new_brk: u64) -> i64 {
+    unsafe {
+        let proc_ptr = &raw mut loader::CURRENT_PROCESS;
+        let Some(ref mut proc) = *proc_ptr else {
+            return -14; // -EFAULT
+        };
+
+        if new_brk == 0 || new_brk < proc.heap_start {
+            return proc.heap_current as i64;
+        }
+
+        if new_brk <= proc.heap_current {
+            proc.heap_current = new_brk;
+            return new_brk as i64;
+        }
+
+        if new_brk > proc.heap_max || new_brk >= loader::USER_STACK_TOP - (64 * 1024) {
+            return proc.heap_current as i64; // Limit exceeded
+        }
+
+        let old_page_end = (proc.heap_current + 0xFFF) & !0xFFF;
+        let new_page_end = (new_brk + 0xFFF) & !0xFFF;
+        let page_flags =
+            crate::mm::vmm::flags::PRESENT
+                | crate::mm::vmm::flags::WRITABLE
+                | crate::mm::vmm::flags::USER_ACCESSIBLE
+                | crate::mm::vmm::flags::NO_EXECUTE;
+
+        let mut curr = old_page_end;
+        while curr < new_page_end {
+            let paddr = match crate::mm::pmm::alloc_frame() {
+                Some(p) => p,
+                None => return proc.heap_current as i64,
+            };
+
+            let frame_ptr = crate::mm::vmm::phys_to_virt::<u8>(paddr);
+            core::ptr::write_bytes(frame_ptr, 0, 4096);
+
+            if let Err(_) = crate::mm::vmm::map_page(curr, paddr, page_flags) {
+                crate::mm::pmm::free_frame(paddr);
+                return proc.heap_current as i64;
+            }
+
+            proc.user_pages.push((curr, paddr));
+            curr += 4096;
+        }
+
+        proc.heap_current = new_brk;
+        new_brk as i64
+    }
 }
 
 fn sys_stat(path_ptr: *const u8, _statbuf: *mut u8) -> i64 {
@@ -299,7 +468,7 @@ fn sys_uname(buf: *mut UtsName) -> i64 {
         copy_cstr(&mut uts.sysname, b"OptiOS");
         copy_cstr(&mut uts.nodename, b"optios");
         copy_cstr(&mut uts.release, b"1.0.0");
-        copy_cstr(&mut uts.version, b"Milestone 7 (Ring 3 Userland)");
+        copy_cstr(&mut uts.version, b"Milestone 8 (POSIX Userland, sys_brk, /proc & optifetch)");
         copy_cstr(&mut uts.machine, b"x86_64");
         copy_cstr(&mut uts.domainname, b"local");
     }

@@ -1,0 +1,10 @@
+[package]
+name = "optios-cat"
+version = "0.1.0"
+edition = "2021"
+authors = ["João Figueiró"]
+description = "POSIX cat utility executing in Ring 3 on OptiOS"
+license = "Proprietary"
+
+[dependencies]
+optios-libc = { path = "../../libs/opti-libc" }
