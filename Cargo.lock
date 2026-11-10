@@ -46,6 +46,7 @@ dependencies = [
  "optios-elf-loader",
  "optios-partition-table",
  "optios-ustar",
+ "optios-wm",
 ]
 
 [[package]]
@@ -72,4 +73,8 @@ dependencies = [
 
 [[package]]
 name = "optios-ustar"
+version = "0.1.0"
+
+[[package]]
+name = "optios-wm"
 version = "0.1.0"

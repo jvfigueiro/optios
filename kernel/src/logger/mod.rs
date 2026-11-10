@@ -8,6 +8,15 @@
 //! fullscreen text console on the Framebuffer, and records entries into `dmesg`.
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static MUTE_CONSOLE: AtomicBool = AtomicBool::new(false);
+
+/// Sets whether kernel logs are forwarded to the video text console.
+/// When muted, logs are still routed to COM1 serial and the dmesg ring buffer.
+pub fn set_console_logging(enabled: bool) {
+    MUTE_CONSOLE.store(!enabled, Ordering::Relaxed);
+}
 
 struct StackWriter<'a> {
     buf: &'a mut [u8],
@@ -38,15 +47,19 @@ pub fn log_impl(prefix: &str, args: fmt::Arguments) {
 
     let output_bytes = &writer.buf[..writer.len];
 
-    // Output to Framebuffer console and dmesg if available, or fallback to serial
+    // Always output formatted logs to COM1 serial
+    for &b in output_bytes {
+        if b == b'\n' {
+            crate::drivers::serial::SERIAL1.send_byte(b'\r');
+        }
+        crate::drivers::serial::SERIAL1.send_byte(b);
+    }
+
+    // Record into dmesg and forward to video text console if not muted
     if let Ok(s) = core::str::from_utf8(output_bytes) {
         crate::drivers::video::console::record_dmesg(s.trim_end());
-        if crate::drivers::video::console::is_initialized() {
-            crate::drivers::video::console::print_str(s);
-        } else {
-            for &b in output_bytes {
-                crate::drivers::serial::SERIAL1.send_byte(b);
-            }
+        if !MUTE_CONSOLE.load(Ordering::Relaxed) && crate::drivers::video::console::is_initialized() {
+            crate::drivers::video::console::print_to_screen_only(s);
         }
     }
 }

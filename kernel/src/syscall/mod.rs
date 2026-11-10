@@ -116,6 +116,22 @@ pub fn init() {
 
         // 5. Configure IA32_FMASK: mask Interrupt Flag (IF, bit 9) and Trap Flag (TF, bit 8)
         msr::wrmsr(IA32_FMASK, 0x300);
+
+        // 6. Pre-allocate userland intermediate page tables (code, heap, stack)
+        // so that process loading does not allocate kernel paging frames at runtime.
+        crate::mm::vmm::preallocate_user_tables(&[
+            0x0040_0000, // User code segment base
+            0x0060_0000,
+            0x0080_0000, // User heap start
+            0x00A0_0000,
+            0x00C0_0000,
+            0x00E0_0000,
+            0x0100_0000,
+            0x0120_0000,
+            0x0140_0000,
+            0x0160_0000,
+            loader::USER_STACK_TOP - 0x1000, // User stack top
+        ]);
     }
 
     info!("Syscall subsystem initialized: IA32_LSTAR registered, Ring 3 -> Ring 0 stack configured.");
@@ -468,7 +484,7 @@ fn sys_uname(buf: *mut UtsName) -> i64 {
         copy_cstr(&mut uts.sysname, b"OptiOS");
         copy_cstr(&mut uts.nodename, b"optios");
         copy_cstr(&mut uts.release, b"1.0.0");
-        copy_cstr(&mut uts.version, b"Milestone 8 (POSIX Userland, sys_brk, /proc & optifetch)");
+        copy_cstr(&mut uts.version, b"Milestone 9 (PS/2 Mouse & Desktop Window Manager)");
         copy_cstr(&mut uts.machine, b"x86_64");
         copy_cstr(&mut uts.domainname, b"local");
     }

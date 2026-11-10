@@ -3,8 +3,8 @@
 // Item: Kernel Main Entry Point (_start) & Text Console Boot
 // Date: 2026-11-10
 
-//! OptiOS Kernel Main Entry Point (_start) — Milestone 8:
-//! POSIX Userland Expansion, sys_brk, /proc & optifetch.
+//! OptiOS Kernel Main Entry Point (_start) — Milestone 9:
+//! PS/2 Mouse Driver (IRQ 12), Window Compositor & Desktop Environment.
 
 #![no_std]
 #![no_main]
@@ -16,6 +16,7 @@ mod boot;
 mod drivers;
 mod firmware;
 mod fs;
+pub mod gui;
 mod logger;
 mod mm;
 mod posix;
@@ -33,6 +34,7 @@ use boot::limine::{
 };
 use drivers::ahci;
 use drivers::keyboard;
+use drivers::mouse;
 use drivers::pci::scan_pci_bus;
 use drivers::serial::SERIAL1;
 use drivers::video::console;
@@ -51,7 +53,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     info!("========================================================");
-    info!("OptiOS Kernel — Milestone 8: POSIX Userland, sys_brk, /proc & optifetch");
+    info!("OptiOS Kernel — Milestone 9: PS/2 Mouse, Window Compositor & Desktop Environment");
     info!("========================================================");
 
     // 2. Validate Limine Base Revision Protocol Handshake
@@ -67,7 +69,6 @@ pub extern "C" fn _start() -> ! {
 
     // 4. Initialize Interrupt Descriptor Table (IDT) with exception handlers
     idt::init();
-    info!("IDT initialized: Exception gates (#DE, #UD, #DF, #GP, #PF) & IRQ gates (32, 33) installed.");
 
     // 5. Query and display CPU model via CPUID
     let cpu_name = get_cpu_info();
@@ -217,7 +218,8 @@ pub extern "C" fn _start() -> ! {
     pic::init();
     pit::init();
     keyboard::init();
-    info!("Enabling hardware interrupts (STI) for timer-based AHCI polling.");
+    mouse::init();
+    info!("Enabling hardware interrupts (STI) for timer-based AHCI polling & PS/2 mouse.");
     sti();
 
     // 16. Initialize Read-Only SATA AHCI 1.0 Controller & inspect drives
@@ -257,12 +259,8 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Syscall / Userland Selftest with Zero-Leak Verification
-        // Note: First invocation populates intermediate paging structures (PDPT/PD/PT)
-        // in the PML4 table. Subsequent runs must exhibit zero PMM frame delta.
-        let _ = syscall::loader::spawn_user_process("/bin/sysinfo");
-
         let free_before = pmm::get_stats().free_frames;
-        info!("Syscall Selftest: Spawning Ring 3 userland binary '/bin/sysinfo' (reference free frames: {})...", free_before);
+        info!("Syscall Selftest: Spawning Ring 3 userland binary '/bin/sysinfo' (initial free frames: {})...", free_before);
         match syscall::loader::spawn_user_process("/bin/sysinfo") {
             Ok(code) => {
                 info!("Syscall Selftest: '/bin/sysinfo' executed in Ring 3, exit status {} -> PASS", code);
@@ -281,11 +279,12 @@ pub extern "C" fn _start() -> ! {
         );
     }
 
+    info!("Entering interactive console event loop.");
+    crate::logger::set_console_logging(false);
+
     // 18. Initialize Shell Session
     let mut shell = shell::Shell::new();
     shell.init_session();
-
-    info!("Entering interactive console event loop.");
 
     // 19. Fullscreen Text Console Interactive Event Loop
     loop {

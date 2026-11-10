@@ -42,7 +42,7 @@ impl Shell {
     /// Initializes the shell terminal session with the MOTD and prompt.
     pub fn init_session(&self) {
         console::print_str("\nOptiOS 1.0\n");
-        console::print_str("Copyright (C) 2026 Joao Figueiro. All Rights Reserved.\n\n");
+        console::print_str("Copyright (C) 2026 João Figueiró. All Rights Reserved.\n\n");
         console::print_str(PROMPT);
     }
 
@@ -122,6 +122,9 @@ impl Shell {
             "dmesg" => self.cmd_dmesg(),
             "clear" => console::clear(),
             "uptime" => self.cmd_uptime(),
+            "gui" | "desktop" => {
+                crate::gui::run_desktop();
+            }
             _ => self.cmd_external(cmd, &args),
         }
     }
@@ -142,11 +145,12 @@ impl Shell {
         self.println("  dmesg           - Display kernel boot log and hardware detection messages");
         self.println("  clear           - Clear terminal screen");
         self.println("  uptime          - Display system uptime and PIT timer tick count");
+        self.println("  gui / desktop   - Launch the OptiOS Desktop Graphical Window Manager");
         self.println("  <prog>          - Execute userland ELF64 executable from VFS (e.g. sysinfo)");
     }
 
     fn cmd_uname(&self, _args: &[&str]) {
-        self.println("OptiOS optios 1.0.0 Milestone 7 (Ring 3 Userland) x86_64 2026-11-10");
+        self.println("OptiOS optios 1.0.0 Milestone 9 (PS/2 Mouse & Desktop Window Manager) x86_64 2026-11-10");
     }
 
     fn cmd_dmesg(&self) {

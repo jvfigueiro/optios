@@ -102,6 +102,36 @@ fn get_or_create_next_table(entry: &mut u64, is_user: bool) -> Option<*mut PageT
     }
 }
 
+/// Pre-allocates intermediate page tables (PDPT, PD, PT) for userland address spaces
+/// so that dynamic process loading does not consume kernel paging frames at runtime.
+pub fn preallocate_user_tables(virt_addrs: &[u64]) {
+    while VMM_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+
+    let pml4_phys = read_cr3();
+    let pml4_virt = phys_to_virt::<PageTable>(pml4_phys);
+
+    unsafe {
+        let pml4 = &mut *pml4_virt;
+        for &virt in virt_addrs {
+            let pml4_idx = ((virt >> 39) & 0x1FF) as usize;
+            let pdpt_idx = ((virt >> 30) & 0x1FF) as usize;
+            let pd_idx = ((virt >> 21) & 0x1FF) as usize;
+
+            if let Some(pdpt_ptr) = get_or_create_next_table(&mut pml4.entries[pml4_idx], true) {
+                let pdpt = &mut *pdpt_ptr;
+                if let Some(pd_ptr) = get_or_create_next_table(&mut pdpt.entries[pdpt_idx], true) {
+                    let pd = &mut *pd_ptr;
+                    let _ = get_or_create_next_table(&mut pd.entries[pd_idx], true);
+                }
+            }
+        }
+    }
+
+    VMM_LOCK.store(false, Ordering::Release);
+}
+
 /// Maps a 4 KiB virtual page to a physical frame with specified flags.
 pub fn map_page(virt_addr: u64, phys_addr: u64, page_flags: u64) -> Result<(), &'static str> {
     while VMM_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {

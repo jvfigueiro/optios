@@ -32,6 +32,7 @@ struct ConsoleState {
     bg_color: u32,
     bold: bool,
     ansi: AnsiParser,
+    utf8_lead: u8,
     initialized: bool,
 }
 
@@ -44,6 +45,7 @@ static mut CONSOLE: ConsoleState = ConsoleState {
     bg_color: DEFAULT_BG,
     bold: false,
     ansi: AnsiParser::new(),
+    utf8_lead: 0,
     initialized: false,
 };
 
@@ -114,13 +116,56 @@ pub fn get_dmesg() -> Vec<String> {
     }
 }
 
-/// Writes a string to the fullscreen console and flushes to the screen.
-pub fn print_str(s: &str) {
-    for b in s.bytes() {
-        if b == b'\n' {
-            crate::drivers::serial::SERIAL1.send_byte(b'\r');
+#[inline]
+fn render_char_glyph(
+    fb: &mut crate::drivers::video::framebuffer::FramebufferDriver,
+    con: *mut ConsoleState,
+    ch: char,
+) {
+    unsafe {
+        let fg = if (*con).bold && (*con).fg_color == DEFAULT_FG {
+            0x00FFFFFF // Bright white for bold default
+        } else {
+            (*con).fg_color
+        };
+
+        fb.draw_char(
+            (*con).cursor_x * FONT_WIDTH,
+            (*con).cursor_y * 16,
+            ch,
+            fg,
+            Some((*con).bg_color),
+        );
+        (*con).cursor_x += 1;
+        if (*con).cursor_x >= (*con).cols {
+            (*con).cursor_x = 0;
+            (*con).cursor_y += 1;
+            if (*con).cursor_y >= (*con).rows {
+                fb.scroll_up(1, (*con).bg_color);
+                (*con).cursor_y = (*con).rows - 1;
+            }
         }
-        crate::drivers::serial::SERIAL1.send_byte(b);
+    }
+}
+
+/// Writes a string to the fullscreen console and COM1 serial, then flushes to the screen.
+pub fn print_str(s: &str) {
+    print_str_internal(s, true);
+}
+
+/// Writes a string directly to the video screen only (without forwarding to COM1 serial).
+pub fn print_to_screen_only(s: &str) {
+    print_str_internal(s, false);
+}
+
+fn print_str_internal(s: &str, send_serial: bool) {
+    if send_serial {
+        for b in s.bytes() {
+            if b == b'\n' {
+                crate::drivers::serial::SERIAL1.send_byte(b'\r');
+            }
+            crate::drivers::serial::SERIAL1.send_byte(b);
+        }
     }
 
     while CONSOLE_LOCK
@@ -140,47 +185,27 @@ pub fn print_str(s: &str) {
             let con = &raw mut CONSOLE;
             for b in s.bytes() {
                 (*con).ansi.parse_byte(b, |action| match action {
-                    AnsiAction::Print(byte) => match byte {
-                        b'\n' => {
-                            (*con).cursor_x = 0;
-                            (*con).cursor_y += 1;
-                            if (*con).cursor_y >= (*con).rows {
-                                fb.scroll_up(1, (*con).bg_color);
-                                (*con).cursor_y = (*con).rows - 1;
+                    AnsiAction::Print(byte) => {
+                        // 2-byte UTF-8 decoding
+                        if (*con).utf8_lead != 0 {
+                            let lead = (*con).utf8_lead;
+                            (*con).utf8_lead = 0;
+                            if (byte & 0xC0) == 0x80 {
+                                let cp = (((lead as u32) & 0x1F) << 6) | ((byte as u32) & 0x3F);
+                                if let Some(ch) = core::char::from_u32(cp) {
+                                    render_char_glyph(fb, con, ch);
+                                    return;
+                                }
                             }
                         }
-                        b'\r' => {
-                            (*con).cursor_x = 0;
-                        }
-                        0x08 => {
-                            if (*con).cursor_x > 0 {
-                                (*con).cursor_x -= 1;
-                                fb.draw_char(
-                                    (*con).cursor_x * FONT_WIDTH,
-                                    (*con).cursor_y * 16,
-                                    ' ',
-                                    (*con).fg_color,
-                                    Some((*con).bg_color),
-                                );
-                            }
-                        }
-                        byte_val => {
-                            let ch = byte_val as char;
-                            let fg = if (*con).bold && (*con).fg_color == DEFAULT_FG {
-                                0x00FFFFFF // Bright white for bold default
-                            } else {
-                                (*con).fg_color
-                            };
 
-                            fb.draw_char(
-                                (*con).cursor_x * FONT_WIDTH,
-                                (*con).cursor_y * 16,
-                                ch,
-                                fg,
-                                Some((*con).bg_color),
-                            );
-                            (*con).cursor_x += 1;
-                            if (*con).cursor_x >= (*con).cols {
+                        if (byte & 0xE0) == 0xC0 {
+                            (*con).utf8_lead = byte;
+                            return;
+                        }
+
+                        match byte {
+                            b'\n' => {
                                 (*con).cursor_x = 0;
                                 (*con).cursor_y += 1;
                                 if (*con).cursor_y >= (*con).rows {
@@ -188,8 +213,26 @@ pub fn print_str(s: &str) {
                                     (*con).cursor_y = (*con).rows - 1;
                                 }
                             }
+                            b'\r' => {
+                                (*con).cursor_x = 0;
+                            }
+                            0x08 => {
+                                if (*con).cursor_x > 0 {
+                                    (*con).cursor_x -= 1;
+                                    fb.draw_char(
+                                        (*con).cursor_x * FONT_WIDTH,
+                                        (*con).cursor_y * 16,
+                                        ' ',
+                                        (*con).fg_color,
+                                        Some((*con).bg_color),
+                                    );
+                                }
+                            }
+                            byte_val => {
+                                render_char_glyph(fb, con, byte_val as char);
+                            }
                         }
-                    },
+                    }
                     AnsiAction::SetFg(color) => {
                         (*con).fg_color = color.to_rgb32(false);
                     }

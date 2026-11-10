@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Interrupt Descriptor Table (IDT), Exception & Hardware IRQ Dispatcher
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Interrupt Descriptor Table (IDT), CPU Exception Handling, and Hardware IRQ Dispatching.
 
@@ -264,6 +264,11 @@ pub extern "C" fn optios_irq_dispatcher(ctx: &ExceptionContext) {
             keyboard::on_irq1();
             pic::send_eoi(1);
         }
+        44 => {
+            // IRQ 12: PS/2 Mouse Controller
+            crate::drivers::mouse::on_irq12();
+            pic::send_eoi(12);
+        }
         v if v >= 32 && v < 48 => {
             pic::send_eoi((v - 32) as u8);
         }
@@ -280,6 +285,7 @@ extern "C" {
     fn isr14(); // #PF Page Fault
     fn irq32(); // IRQ 0: System Timer
     fn irq33(); // IRQ 1: PS/2 Keyboard
+    fn irq44(); // IRQ 12: PS/2 Mouse
 }
 
 core::arch::global_asm!(
@@ -315,6 +321,7 @@ core::arch::global_asm!(
 
     IRQ_STUB      32
     IRQ_STUB      33
+    IRQ_STUB      44
 
     isr_common:
         cld
@@ -395,6 +402,7 @@ pub fn init() {
         // External Hardware Interrupt Gates (32..47)
         (*idt_ptr_raw)[32].set_handler(irq32 as *const () as usize, 0);
         (*idt_ptr_raw)[33].set_handler(irq33 as *const () as usize, 0);
+        (*idt_ptr_raw)[44].set_handler(irq44 as *const () as usize, 0);
 
         let idt_ptr = IdtPointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -403,5 +411,5 @@ pub fn init() {
 
         asm!("lidt [{}]", in(reg) &idt_ptr, options(readonly, nostack, preserves_flags));
     }
-    info!("IDT initialized: Exception gates (#DE, #UD, #DF, #GP, #PF) & IRQ gates (32, 33) installed.");
+    info!("IDT initialized: Exception gates (#DE, #UD, #DF, #GP, #PF) & IRQ gates (32, 33, 44) installed.");
 }

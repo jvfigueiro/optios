@@ -85,7 +85,7 @@ EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/motd"
 OptiOS 1.0
-Copyright (C) 2026 Joao Figueiro. All Rights Reserved.
+Copyright (C) 2026 João Figueiró. All Rights Reserved.
 EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/usr/share/hwdata/pci.ids"

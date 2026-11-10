@@ -1,12 +1,12 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Dual 8259 Programmable Interrupt Controller (PIC) Driver
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Dual 8259 Programmable Interrupt Controller (PIC) driver.
 //! Remaps legacy hardware IRQs 0..15 to IDT vectors 32..47 (0x20..0x2F).
 
-use crate::arch::x86_64::io::{io_wait, outb};
+use crate::arch::x86_64::io::{inb, io_wait, outb};
 use crate::info;
 
 const PIC1_CMD: u16 = 0x20;
@@ -60,6 +60,22 @@ pub fn init() {
     }
 
     info!("8259 PIC initialized: IRQs remapped to vectors 32..47 (IRQ 0 & IRQ 1 unmasked).");
+}
+
+/// Unmasks a specific hardware IRQ line (0..15).
+pub fn unmask_irq(irq: u8) {
+    unsafe {
+        if irq < 8 {
+            let mask = inb(PIC1_DATA) & !(1 << irq);
+            outb(PIC1_DATA, mask);
+        } else {
+            let mask = inb(PIC2_DATA) & !(1 << (irq - 8));
+            outb(PIC2_DATA, mask);
+            // Ensure cascade IRQ 2 is unmasked on Master PIC
+            let master_mask = inb(PIC1_DATA) & !(1 << 2);
+            outb(PIC1_DATA, master_mask);
+        }
+    }
 }
 
 /// Sends the End-Of-Interrupt (EOI) command to the PIC(s) for the given IRQ number (0..15).

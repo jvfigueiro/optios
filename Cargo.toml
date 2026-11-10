@@ -6,6 +6,7 @@ members = [
     "libs/partition-table",
     "libs/elf-loader",
     "libs/ansi-parser",
+    "libs/opti-wm",
     "libs/opti-libc",
     "userland/sysinfo",
     "userland/cat",

@@ -26,6 +26,11 @@ The kernel is structured in modular layers with strict boundaries:
                            |
                            v  (POSIX System Calls: SYS_READ, WRITE, OPEN, CLOSE, STAT, LSEEK, BRK, GETPID, EXIT, UNAME)
 +--------------------------------------------------------+
+|          Desktop Window Manager & Compositor (gui)     |
+|     - libs/opti-wm: Z-Order, Hit-Testing, Drag Clamping|
+|     - 4 Mini Apps: Terminal, Hardware, Storage, Memory |
+|     - Top System Bar, Bottom Dock & Contrast Cursor    |
++--------------------------------------------------------+
 |             Interactive Shell & Terminal               |
 |     - opti-sh: Prompt 'optios - # ', argc/argv exec    |
 |     - Fullscreen Text Console (/dev/tty0 Style)        |
@@ -63,6 +68,7 @@ The kernel is structured in modular layers with strict boundaries:
 |     - Serial Console (16550 UART)                      |
 |     - Framebuffer GOP with RAM Double Buffering        |
 |     - PS/2 Keyboard (IRQ 1 / Lock-Free Ring Buffer)    |
+|     - PS/2 Mouse (IRQ 12 / Vector 44 / 3-Byte Packets) |
 |     - SATA AHCI 1.0/1.3 Read-Only Storage Driver       |
 +--------------------------------------------------------+
 |              Architecture Abstraction                  |
