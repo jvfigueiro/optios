@@ -47,6 +47,8 @@ pub enum Errno {
     EISDIR = 21,
     /// Invalid argument.
     EINVAL = 22,
+    /// Too many open files.
+    EMFILE = 24,
     /// No space left on device.
     ENOSPC = 28,
     /// Illegal seek.
@@ -83,6 +85,7 @@ impl Errno {
             Errno::ENOTDIR => "ENOTDIR (Not a directory)",
             Errno::EISDIR => "EISDIR (Is a directory)",
             Errno::EINVAL => "EINVAL (Invalid argument)",
+            Errno::EMFILE => "EMFILE (Too many open files)",
             Errno::ENOSPC => "ENOSPC (No space left on device)",
             Errno::ESPIPE => "ESPIPE (Illegal seek)",
             Errno::EROFS => "EROFS (Read-only file system)",
@@ -120,6 +123,7 @@ const _: () = {
         Errno::ENOTDIR as i32,
         Errno::EISDIR as i32,
         Errno::EINVAL as i32,
+        Errno::EMFILE as i32,
         Errno::ENOSPC as i32,
         Errno::ESPIPE as i32,
         Errno::EROFS as i32,

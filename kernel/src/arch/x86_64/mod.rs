@@ -12,6 +12,7 @@ pub mod io;
 pub mod msr;
 pub mod pic;
 pub mod pit;
+pub mod user_copy;
 
 /// Halts the CPU until the next external interrupt arrives.
 #[inline]

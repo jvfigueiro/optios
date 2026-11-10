@@ -74,6 +74,9 @@ pub extern "C" fn _start() -> ! {
     let cpu_name = get_cpu_info();
     info!("CPU (CPUID): {}", cpu_name.as_str());
 
+    // 5.1 Initialize hardware CPU security features (SMEP & SMAP in CR4)
+    arch::x86_64::user_copy::init_smep_smap();
+
     // 6. Query and parse UEFI memory map passed by Limine
     let memmap_entries = match get_memory_map() {
         Some(entries) => entries,

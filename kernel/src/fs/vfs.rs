@@ -25,6 +25,22 @@ use crate::{info, warn};
 pub const FAT_FD_BASE: usize = 0x4000_0000;
 pub const PROC_FD_BASE: usize = 0x8000_0000;
 
+pub const MNT_RDONLY: u32 = 1 << 0;
+pub const MNT_NOEXEC: u32 = 1 << 1;
+
+/// Returns the mount flags associated with the filesystem serving `path`.
+pub fn get_mount_flags(path: &str) -> u32 {
+    let clean = path.trim_start_matches('/');
+    if clean.starts_with("mnt/") || clean == "mnt" {
+        MNT_RDONLY | MNT_NOEXEC
+    } else if clean.starts_with("proc/") || clean == "proc" {
+        MNT_RDONLY | MNT_NOEXEC
+    } else {
+        // Root initramfs is read-only, but executable
+        MNT_RDONLY
+    }
+}
+
 struct OpenProc {
     content: Vec<u8>,
 }
@@ -133,7 +149,7 @@ pub fn mount_fat32_sda1(
             }
             FAT_FS.lock.store(false, Ordering::Release);
             info!(
-                "VFS: Mounted FAT32 filesystem on /dev/sda1 (start LBA {}, {} sectors) at '/mnt/sda1' (Read-Only).",
+                "VFS: Mounted FAT32 filesystem on /dev/sda1 (start LBA {}, {} sectors) at '/mnt/sda1' (Read-Only, noexec).",
                 start_lba, total_sectors
             );
             Ok(())

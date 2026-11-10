@@ -31,6 +31,7 @@ use optios_ahci_proto::{
 };
 use optios_partition_table::{parse_gpt, parse_mbr, GptPartition};
 
+use crate::drivers::kit::MmioRegion;
 use crate::drivers::pci::{self, PciDevice};
 use crate::mm::{pmm, vmm};
 use crate::time;
@@ -61,7 +62,7 @@ pub const TIMEOUT_BOH_MS: u64 = 500;
 pub struct AhciPort {
     #[allow(dead_code)]
     pub port_number: u8,
-    pub reg_base: u64,
+    pub regs: MmioRegion,
     pub ctrl_frame_phys: u64,
     pub ctrl_frame_virt: u64,
     pub data_frame_phys: u64,
@@ -77,7 +78,7 @@ impl AhciPort {
     /// Initializes and brings up a SATA port with dedicated control and data DMA frames.
     pub unsafe fn init(
         port_number: u8,
-        reg_base: u64,
+        regs: MmioRegion,
         ncs: u8,
         s64a: bool,
     ) -> Result<Self, AhciError> {
@@ -114,7 +115,7 @@ impl AhciPort {
 
         let port = Self {
             port_number,
-            reg_base,
+            regs,
             ctrl_frame_phys,
             ctrl_frame_virt,
             data_frame_phys,
@@ -129,22 +130,28 @@ impl AhciPort {
         Ok(port)
     }
 
+    /// Returns the virtual base address of this port's MMIO register window.
+    #[allow(dead_code)]
+    pub fn reg_base(&self) -> u64 {
+        self.regs.base()
+    }
+
     /// Stops command and FIS receive engines per AHCI 1.3 spec Section 10.3.1.
     pub unsafe fn stop_engine(&self) -> Result<(), AhciError> {
-        let mut cmd = mmio_read32(self.reg_base, 0x18);
+        let mut cmd = self.regs.read_u32(0x18);
         cmd &= !HBA_PXCMD_ST;
-        mmio_write32(self.reg_base, 0x18, cmd);
+        self.regs.write_u32(0x18, cmd);
 
         time::wait_until(TIMEOUT_ENGINE_STOP_MS, || {
-            (mmio_read32(self.reg_base, 0x18) & HBA_PXCMD_CR) == 0
+            (self.regs.read_u32(0x18) & HBA_PXCMD_CR) == 0
         })?;
 
-        cmd = mmio_read32(self.reg_base, 0x18);
+        cmd = self.regs.read_u32(0x18);
         cmd &= !HBA_PXCMD_FRE;
-        mmio_write32(self.reg_base, 0x18, cmd);
+        self.regs.write_u32(0x18, cmd);
 
         time::wait_until(TIMEOUT_ENGINE_STOP_MS, || {
-            (mmio_read32(self.reg_base, 0x18) & HBA_PXCMD_FR) == 0
+            (self.regs.read_u32(0x18) & HBA_PXCMD_FR) == 0
         })?;
 
         Ok(())
@@ -157,37 +164,35 @@ impl AhciPort {
         let clb_phys = self.ctrl_frame_phys;
         let fb_phys = self.ctrl_frame_phys + 0x400;
 
-        mmio_write32(self.reg_base, 0x00, (clb_phys & 0xFFFF_FFFF) as u32);
-        mmio_write32(self.reg_base, 0x04, (clb_phys >> 32) as u32);
-        mmio_write32(self.reg_base, 0x08, (fb_phys & 0xFFFF_FFFF) as u32);
-        mmio_write32(self.reg_base, 0x0C, (fb_phys >> 32) as u32);
+        self.regs.write_u32(0x00, (clb_phys & 0xFFFF_FFFF) as u32);
+        self.regs.write_u32(0x04, (clb_phys >> 32) as u32);
+        self.regs.write_u32(0x08, (fb_phys & 0xFFFF_FFFF) as u32);
+        self.regs.write_u32(0x0C, (fb_phys >> 32) as u32);
 
-        mmio_write32(self.reg_base, 0x30, 0xFFFF_FFFF);
-        mmio_write32(self.reg_base, 0x10, 0xFFFF_FFFF);
-        mmio_write32(self.reg_base, 0x14, 0);
+        self.regs.write_u32(0x30, 0xFFFF_FFFF);
+        self.regs.write_u32(0x10, 0xFFFF_FFFF);
+        self.regs.write_u32(0x14, 0);
 
-        let mut cmd = mmio_read32(self.reg_base, 0x18);
+        let mut cmd = self.regs.read_u32(0x18);
         cmd |= HBA_PXCMD_FRE;
-        mmio_write32(self.reg_base, 0x18, cmd);
+        self.regs.write_u32(0x18, cmd);
 
         time::wait_until(TIMEOUT_PORT_BUSY_MS, || {
-            (mmio_read32(self.reg_base, 0x20) & (ATA_DEV_BSY | ATA_DEV_DRQ)) == 0
+            (self.regs.read_u32(0x20) & (ATA_DEV_BSY | ATA_DEV_DRQ)) == 0
         })?;
 
-        cmd = mmio_read32(self.reg_base, 0x18);
+        cmd = self.regs.read_u32(0x18);
         cmd |= HBA_PXCMD_ST;
-        mmio_write32(self.reg_base, 0x18, cmd);
+        self.regs.write_u32(0x18, cmd);
 
         Ok(())
     }
 
     /// Selects an unoccupied command slot within `0..NCS`.
     pub fn find_free_slot(&self) -> Result<u8, AhciError> {
-        unsafe {
-            let ci = mmio_read32(self.reg_base, 0x38);
-            let sact = mmio_read32(self.reg_base, 0x34);
-            find_free_slot(ci | sact, self.ncs).ok_or(AhciError::NoFreeSlot)
-        }
+        let ci = self.regs.read_u32(0x38);
+        let sact = self.regs.read_u32(0x34);
+        find_free_slot(ci | sact, self.ncs).ok_or(AhciError::NoFreeSlot)
     }
 
     /// Executes an ATA command with specified payload size (up to 4096 bytes).
@@ -216,28 +221,28 @@ impl AhciPort {
         build_command_header(5, 1, ctba_phys, cmd_hdr_slice)?;
 
         time::wait_until(TIMEOUT_PORT_BUSY_MS, || {
-            (mmio_read32(self.reg_base, 0x20) & (ATA_DEV_BSY | ATA_DEV_DRQ)) == 0
+            (self.regs.read_u32(0x20) & (ATA_DEV_BSY | ATA_DEV_DRQ)) == 0
         })?;
 
         compiler_fence(Ordering::SeqCst);
-        mmio_write32(self.reg_base, 0x38, 1u32 << slot);
+        self.regs.write_u32(0x38, 1u32 << slot);
 
         let wait_res = time::wait_until(TIMEOUT_CMD_COMPLETE_MS, || {
-            let ci = mmio_read32(self.reg_base, 0x38);
-            let is = mmio_read32(self.reg_base, 0x10);
-            let tfd = mmio_read32(self.reg_base, 0x20);
+            let ci = self.regs.read_u32(0x38);
+            let is = self.regs.read_u32(0x10);
+            let tfd = self.regs.read_u32(0x20);
             (ci & (1u32 << slot)) == 0 || (is & HBA_PXIS_TFES) != 0 || (tfd & ATA_TFD_ERR) != 0
         });
 
-        let is = mmio_read32(self.reg_base, 0x10);
-        let tfd = mmio_read32(self.reg_base, 0x20);
+        let is = self.regs.read_u32(0x10);
+        let tfd = self.regs.read_u32(0x20);
 
         if wait_res.is_err() || (is & HBA_PXIS_TFES) != 0 || (tfd & ATA_TFD_ERR) != 0 {
             let _ = self.stop_engine();
-            mmio_write32(self.reg_base, 0x10, 0xFFFF_FFFF);
-            mmio_write32(self.reg_base, 0x30, 0xFFFF_FFFF);
+            self.regs.write_u32(0x10, 0xFFFF_FFFF);
+            self.regs.write_u32(0x30, 0xFFFF_FFFF);
 
-            let tfd_after = mmio_read32(self.reg_base, 0x20);
+            let tfd_after = self.regs.read_u32(0x20);
             let bsy = (tfd_after & ATA_DEV_BSY) != 0;
             let drq = (tfd_after & ATA_DEV_DRQ) != 0;
 
@@ -246,13 +251,13 @@ impl AhciPort {
                 return Err(AhciError::PortFailed);
             }
 
-            let mut cmd_reg = mmio_read32(self.reg_base, 0x18);
+            let mut cmd_reg = self.regs.read_u32(0x18);
             cmd_reg |= HBA_PXCMD_FRE;
-            mmio_write32(self.reg_base, 0x18, cmd_reg);
+            self.regs.write_u32(0x18, cmd_reg);
 
-            cmd_reg = mmio_read32(self.reg_base, 0x18);
+            cmd_reg = self.regs.read_u32(0x18);
             cmd_reg |= HBA_PXCMD_ST;
-            mmio_write32(self.reg_base, 0x18, cmd_reg);
+            self.regs.write_u32(0x18, cmd_reg);
 
             if wait_res.is_err() {
                 return Err(AhciError::Timeout);
@@ -411,11 +416,13 @@ impl Default for AhciControllerInfo {
 }
 
 #[inline]
+#[allow(dead_code)]
 pub unsafe fn mmio_read32(base: u64, offset: usize) -> u32 {
     read_volatile((base + offset as u64) as *const u32)
 }
 
 #[inline]
+#[allow(dead_code)]
 pub unsafe fn mmio_write32(base: u64, offset: usize, val: u32) {
     write_volatile((base + offset as u64) as *mut u32, val);
 }
@@ -512,7 +519,8 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
         };
         info.abar_virt = abar_virt;
 
-        let pi = mmio_read32(abar_virt, 0x0C);
+        let abar = MmioRegion::new(abar_virt, initial_map_len);
+        let pi = abar.read_u32(0x0C);
         info.ports_implemented = pi;
 
         let highest_implemented_port = if pi == 0 { 0 } else { 31 - pi.leading_zeros() as u64 };
@@ -526,6 +534,9 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
             }
         }
 
+        // Re-wrap with full mapped size
+        let abar = MmioRegion::new(abar_virt, map_len as usize);
+
         info!(
             "AHCI: ABAR registers span {} bytes (BAR size: {} bytes, highest port: {}); MMIO mapping is page-granular ({} bytes).",
             needed_len,
@@ -534,28 +545,28 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
             ((map_len + 4095) / 4096) * 4096
         );
 
-        let ghc = mmio_read32(abar_virt, 0x04);
-        mmio_write32(abar_virt, 0x04, (ghc | HBA_GHC_AE) & !HBA_GHC_IE);
+        let ghc = abar.read_u32(0x04);
+        abar.write_u32(0x04, (ghc | HBA_GHC_AE) & !HBA_GHC_IE);
 
-        let vs = mmio_read32(abar_virt, 0x10);
+        let vs = abar.read_u32(0x10);
         info.version_major = ((vs >> 16) & 0xFFFF) as u16;
         info.version_minor = (vs & 0xFFFF) as u16;
 
-        let cap = mmio_read32(abar_virt, 0x00);
+        let cap = abar.read_u32(0x00);
         let s64a = (cap & (1 << 31)) != 0;
         let ncs = (((cap >> 8) & 0x1F) + 1) as u8;
         info.s64a = s64a;
         info.ncs = ncs;
 
-        let cap2 = mmio_read32(abar_virt, 0x24);
+        let cap2 = abar.read_u32(0x24);
         let boh = (cap2 & 1) != 0;
         info.boh = boh;
 
         if boh {
-            let bohc = mmio_read32(abar_virt, 0x28);
-            mmio_write32(abar_virt, 0x28, bohc | (1 << 1));
+            let bohc = abar.read_u32(0x28);
+            abar.write_u32(0x28, bohc | (1 << 1));
             let handoff_res = time::wait_until(TIMEOUT_BOH_MS, || {
-                (mmio_read32(abar_virt, 0x28) & 1) == 0
+                (abar.read_u32(0x28) & 1) == 0
             });
             if handoff_res.is_ok() {
                 info!("AHCI: BIOS/OS handoff (BOHC) completed successfully.");
@@ -566,7 +577,7 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
             info!("AHCI: BIOS/OS handoff (BOHC) not supported by hardware (untested in QEMU).");
         }
 
-        let pi = mmio_read32(abar_virt, 0x0C);
+        let pi = abar.read_u32(0x0C);
         info.ports_implemented = pi;
 
         info!(
@@ -595,8 +606,13 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
                 continue;
             }
 
-            let port_base = abar_virt + 0x100 + (port_num as u64 * 0x80);
-            let ssts = mmio_read32(port_base, 0x28);
+            let port_offset = 0x100 + (port_num as usize * 0x80);
+            if port_offset + 0x80 > map_len as usize {
+                warn!("AHCI: Port {} offset 0x{:x} exceeds mapped ABAR 0x{:x}", port_num, port_offset, map_len);
+                continue;
+            }
+            let port_regs = abar.sub_region(port_offset, 0x80);
+            let ssts = port_regs.read_u32(0x28);
             let det = ssts & 0x0F;
             let ipm = (ssts >> 8) & 0x0F;
 
@@ -604,9 +620,9 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
                 continue;
             }
 
-            let sig = mmio_read32(port_base, 0x24);
+            let sig = port_regs.read_u32(0x24);
             if sig == SATA_SIG_ATA {
-                match AhciPort::init(port_num, port_base, ncs, s64a) {
+                match AhciPort::init(port_num, port_regs, ncs, s64a) {
                     Ok(mut port) => {
                         match port.execute_command(AllowedCommand::IdentifyDevice) {
                             Ok(()) => {
@@ -740,7 +756,7 @@ pub fn init(devices: &[PciDevice]) -> AhciControllerInfo {
                     "AHCI Port {}: SATAPI Optical Drive detected (SIG=0xEB140101).",
                     port_num
                 );
-                if let Ok(port) = AhciPort::init(port_num, port_base, ncs, s64a) {
+                if let Ok(port) = AhciPort::init(port_num, port_regs, ncs, s64a) {
                     let ports_raw = &raw mut PORTS;
                     (*ports_raw).push(port);
                 }

@@ -19,28 +19,36 @@ use optios_elf_loader::parse_elf;
 pub const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_0000;
 pub const USER_STACK_PAGES: u64 = 4; // 16 KiB stack
 
-/// Memory tracking descriptor for the currently active userland process.
-pub struct ProcessMemory {
+/// Process Control Block tracking memory, heap, and per-process descriptors.
+pub struct ProcessControlBlock {
     pub user_pages: Vec<(u64, u64)>, // (vaddr, paddr)
     pub heap_start: u64,
     pub heap_current: u64,
     pub heap_max: u64,
+    pub fd_table: super::FileDescriptorTable,
 }
 
-pub static mut CURRENT_PROCESS: Option<ProcessMemory> = None;
+pub static mut CURRENT_PROCESS: Option<ProcessControlBlock> = None;
 
 /// Frees all physical frames and unmaps virtual pages allocated to the active process.
 pub fn clean_current_process() {
     unsafe {
         let proc_ptr = &raw mut CURRENT_PROCESS;
         let proc_opt = (*proc_ptr).take();
-        if let Some(proc) = proc_opt {
+        if let Some(mut proc) = proc_opt {
+            // Close all open user descriptors in the per-process table
+            for i in 3..super::MAX_USER_FDS {
+                if proc.fd_table.entries[i].is_open {
+                    let _ = vfs::close(proc.fd_table.entries[i].vfs_fd);
+                    proc.fd_table.entries[i].is_open = false;
+                }
+            }
+
             for (vaddr, paddr) in proc.user_pages {
                 let _ = vmm::unmap_page(vaddr);
                 pmm::free_frame(paddr);
             }
         }
-        super::reset_user_fds();
     }
 }
 
@@ -52,7 +60,13 @@ pub fn spawn_user_process(path: &str) -> Result<i32, &'static str> {
 
 /// Spawns an ELF64 binary with command-line arguments and executes it in Ring 3.
 pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'static str> {
-    // 0. Clean any remnant process resources
+    // 0. Enforce VFS mount execution policy (noexec)
+    let mount_flags = vfs::get_mount_flags(path);
+    if (mount_flags & vfs::MNT_NOEXEC) != 0 {
+        return Err("Execution prohibited by mount policy (noexec)");
+    }
+
+    // Clean any remnant process resources
     clean_current_process();
 
     // 1. Stat file from VFS to obtain size
@@ -113,11 +127,17 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
 
         // Copy segment file data to destination user memory
         unsafe {
+            if crate::arch::x86_64::user_copy::is_smap_enabled() {
+                crate::arch::x86_64::user_copy::stac();
+            }
             core::ptr::copy_nonoverlapping(
                 seg.file_data.as_ptr(),
                 seg.vaddr as *mut u8,
                 seg.file_data.len(),
             );
+            if crate::arch::x86_64::user_copy::is_smap_enabled() {
+                crate::arch::x86_64::user_copy::clac();
+            }
         }
     }
 
@@ -153,6 +173,12 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
     }
 
     // 8. Setup POSIX System V AMD64 ABI argc/argv layout on User Stack
+    unsafe {
+        if crate::arch::x86_64::user_copy::is_smap_enabled() {
+            crate::arch::x86_64::user_copy::stac();
+        }
+    }
+
     let mut sp = USER_STACK_TOP;
     let mut arg_ptrs: Vec<u64> = Vec::new();
 
@@ -197,13 +223,20 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
         sp -= 8;
     }
 
-    // 9. Register active process memory tracking
     unsafe {
-        CURRENT_PROCESS = Some(ProcessMemory {
+        if crate::arch::x86_64::user_copy::is_smap_enabled() {
+            crate::arch::x86_64::user_copy::clac();
+        }
+    }
+
+    // 9. Register active process tracking
+    unsafe {
+        CURRENT_PROCESS = Some(ProcessControlBlock {
             user_pages,
             heap_start,
             heap_current,
             heap_max,
+            fd_table: super::FileDescriptorTable::new(),
         });
     }
 

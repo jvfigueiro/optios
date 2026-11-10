@@ -19,8 +19,10 @@ pub mod loader;
 
 use crate::arch::x86_64::gdt::{self, KERNEL_CODE_SELECTOR};
 use crate::arch::x86_64::msr::{self, EFER_SCE, IA32_EFER, IA32_FMASK, IA32_LSTAR, IA32_STAR};
+use crate::arch::x86_64::user_copy::{copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::drivers::video::console;
 use crate::fs::vfs;
+use crate::posix::errno::Errno;
 use crate::{info, warn};
 
 pub const SYS_READ: u64 = 0;
@@ -34,44 +36,67 @@ pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_UNAME: u64 = 63;
 
-const USER_SPACE_LIMIT: u64 = 0x0000_8000_0000_0000;
-
 pub const SEEK_SET: u64 = 0;
 pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
 
-const MAX_USER_FDS: usize = 32;
+pub const MAX_USER_FDS: usize = 32;
 
-#[derive(Clone, Copy)]
-struct UserFileDescriptor {
-    vfs_fd: usize,
-    offset: usize,
-    is_open: bool,
+#[derive(Clone, Copy, Debug)]
+pub struct UserFileDescriptor {
+    pub vfs_fd: usize,
+    pub offset: usize,
+    pub is_open: bool,
 }
 
-static mut USER_FD_TABLE: [UserFileDescriptor; MAX_USER_FDS] = [UserFileDescriptor {
-    vfs_fd: 0,
-    offset: 0,
-    is_open: false,
-}; MAX_USER_FDS];
+/// Per-process file descriptor table local to each process control block.
+pub struct FileDescriptorTable {
+    pub entries: [UserFileDescriptor; MAX_USER_FDS],
+}
+
+impl FileDescriptorTable {
+    pub const fn new() -> Self {
+        Self {
+            entries: [UserFileDescriptor {
+                vfs_fd: 0,
+                offset: 0,
+                is_open: false,
+            }; MAX_USER_FDS],
+        }
+    }
+
+    pub fn allocate(&mut self, vfs_fd: usize) -> Result<usize, Errno> {
+        for i in 3..MAX_USER_FDS {
+            if !self.entries[i].is_open {
+                self.entries[i] = UserFileDescriptor {
+                    vfs_fd,
+                    offset: 0,
+                    is_open: true,
+                };
+                return Ok(i);
+            }
+        }
+        Err(Errno::EMFILE)
+    }
+
+    pub fn get_mut(&mut self, fd: usize) -> Result<&mut UserFileDescriptor, Errno> {
+        if fd < 3 || fd >= MAX_USER_FDS || !self.entries[fd].is_open {
+            return Err(Errno::EBADF);
+        }
+        Ok(&mut self.entries[fd])
+    }
+
+    pub fn close(&mut self, fd: usize) -> Result<usize, Errno> {
+        let entry = self.get_mut(fd)?;
+        let vfs_fd = entry.vfs_fd;
+        entry.is_open = false;
+        Ok(vfs_fd)
+    }
+}
 
 static mut STDIN_PENDING: [u8; 16] = [0; 16];
 static mut STDIN_PENDING_LEN: usize = 0;
 static mut STDIN_PENDING_POS: usize = 0;
-
-/// Closes all active user file descriptors and resets the process file table.
-pub fn reset_user_fds() {
-    unsafe {
-        for i in 3..MAX_USER_FDS {
-            if USER_FD_TABLE[i].is_open {
-                let _ = vfs::close(USER_FD_TABLE[i].vfs_fd);
-                USER_FD_TABLE[i].is_open = false;
-            }
-        }
-        STDIN_PENDING_LEN = 0;
-        STDIN_PENDING_POS = 0;
-    }
-}
 
 #[repr(C)]
 pub struct UtsName {
@@ -234,10 +259,6 @@ pub extern "C" fn syscall_dispatch(
 }
 
 fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
-    if buf as u64 >= USER_SPACE_LIMIT || buf as u64 + count as u64 > USER_SPACE_LIMIT {
-        return -14; // -EFAULT
-    }
-
     if count == 0 {
         return 0;
     }
@@ -248,8 +269,8 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
             if STDIN_PENDING_POS < STDIN_PENDING_LEN {
                 let available = STDIN_PENDING_LEN - STDIN_PENDING_POS;
                 let to_copy = available.min(count);
-                for i in 0..to_copy {
-                    *buf.add(i) = STDIN_PENDING[STDIN_PENDING_POS + i];
+                if let Err(e) = copy_to_user(buf, &STDIN_PENDING[STDIN_PENDING_POS..STDIN_PENDING_POS + to_copy]) {
+                    return -(e as i64);
                 }
                 STDIN_PENDING_POS += to_copy;
                 if STDIN_PENDING_POS >= STDIN_PENDING_LEN {
@@ -314,10 +335,10 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
         }
 
         let to_copy = seq_len.min(count);
+        if let Err(e) = copy_to_user(buf, &seq_buf[..to_copy]) {
+            return -(e as i64);
+        }
         unsafe {
-            for i in 0..to_copy {
-                *buf.add(i) = seq_buf[i];
-            }
             if seq_len > to_copy {
                 let remaining = seq_len - to_copy;
                 for i in 0..remaining {
@@ -330,20 +351,30 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
         to_copy as i64
     } else {
         let fd_idx = fd as usize;
-        if fd_idx < 3 || fd_idx >= MAX_USER_FDS {
-            return -9; // -EBADF
-        }
-
         unsafe {
-            let fd_entry = &mut USER_FD_TABLE[fd_idx];
-            if !fd_entry.is_open {
-                return -9; // -EBADF
-            }
+            let proc_ptr = &raw mut loader::CURRENT_PROCESS;
+            let Some(ref mut proc) = *proc_ptr else {
+                return -14; // -EFAULT
+            };
 
-            let mut slice = core::slice::from_raw_parts_mut(buf, count);
-            match vfs::read(fd_entry.vfs_fd, fd_entry.offset, &mut slice) {
+            let (vfs_fd, offset) = {
+                let fd_entry = match proc.fd_table.get_mut(fd_idx) {
+                    Ok(entry) => entry,
+                    Err(e) => return -(e as i64),
+                };
+                (fd_entry.vfs_fd, fd_entry.offset)
+            };
+
+            let read_limit = count.min(65536);
+            let mut kbuf = alloc::vec![0u8; read_limit];
+            match vfs::read(vfs_fd, offset, &mut kbuf) {
                 Ok(n) => {
-                    fd_entry.offset += n;
+                    if let Err(e) = copy_to_user(buf, &kbuf[..n]) {
+                        return -(e as i64);
+                    }
+                    if let Ok(entry) = proc.fd_table.get_mut(fd_idx) {
+                        entry.offset += n;
+                    }
                     n as i64
                 }
                 Err(e) => -(e as i64),
@@ -353,13 +384,17 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> i64 {
 }
 
 fn sys_write(fd: u64, buf: *const u8, count: usize) -> i64 {
-    if buf as u64 >= USER_SPACE_LIMIT || buf as u64 + count as u64 > USER_SPACE_LIMIT {
-        return -14; // -EFAULT
+    if count == 0 {
+        return 0;
     }
 
     if fd == 1 || fd == 2 {
-        let slice = unsafe { core::slice::from_raw_parts(buf, count) };
-        if let Ok(s) = core::str::from_utf8(slice) {
+        let write_limit = count.min(65536);
+        let mut kbuf = alloc::vec![0u8; write_limit];
+        if let Err(e) = copy_from_user(&mut kbuf, buf) {
+            return -(e as i64);
+        }
+        if let Ok(s) = core::str::from_utf8(&kbuf) {
             console::print_str(s);
         }
         count as i64
@@ -369,87 +404,63 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> i64 {
 }
 
 fn sys_open(path_ptr: *const u8, _flags: u64, _mode: u64) -> i64 {
-    if path_ptr as u64 >= USER_SPACE_LIMIT {
-        return -14; // -EFAULT
-    }
-
-    let mut len = 0;
-    while len < 256 {
-        unsafe {
-            if *path_ptr.add(len) == 0 {
-                break;
-            }
-        }
-        len += 1;
-    }
-    if len >= 256 {
-        return -36; // -ENAMETOOLONG
-    }
-
-    let slice = unsafe { core::slice::from_raw_parts(path_ptr, len) };
-    let path = match core::str::from_utf8(slice) {
+    let path = match copy_cstr_from_user(path_ptr, 256) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return -(e as i64),
     };
 
-    // Find free user file descriptor slot (>= 3)
-    let mut free_fd = None;
+    let vfs_fd = match vfs::open(&path) {
+        Ok(fd) => fd,
+        Err(e) => return -(e as i64),
+    };
+
     unsafe {
-        for i in 3..MAX_USER_FDS {
-            if !USER_FD_TABLE[i].is_open {
-                free_fd = Some(i);
-                break;
+        let proc_ptr = &raw mut loader::CURRENT_PROCESS;
+        let Some(ref mut proc) = *proc_ptr else {
+            let _ = vfs::close(vfs_fd);
+            return -14; // -EFAULT
+        };
+
+        match proc.fd_table.allocate(vfs_fd) {
+            Ok(fd) => fd as i64,
+            Err(e) => {
+                let _ = vfs::close(vfs_fd);
+                -(e as i64)
             }
         }
-    }
-
-    let Some(fd) = free_fd else {
-        return -24; // -EMFILE (Too many open files)
-    };
-
-    match vfs::open(path) {
-        Ok(vfs_fd) => {
-            unsafe {
-                USER_FD_TABLE[fd] = UserFileDescriptor {
-                    vfs_fd,
-                    offset: 0,
-                    is_open: true,
-                };
-            }
-            fd as i64
-        }
-        Err(e) => -(e as i64),
     }
 }
 
 fn sys_close(fd: u64) -> i64 {
     let fd_idx = fd as usize;
-    if fd_idx < 3 || fd_idx >= MAX_USER_FDS {
-        return -9; // -EBADF
-    }
-
     unsafe {
-        let fd_entry = &mut USER_FD_TABLE[fd_idx];
-        if !fd_entry.is_open {
-            return -9; // -EBADF
+        let proc_ptr = &raw mut loader::CURRENT_PROCESS;
+        let Some(ref mut proc) = *proc_ptr else {
+            return -14; // -EFAULT
+        };
+
+        match proc.fd_table.close(fd_idx) {
+            Ok(vfs_fd) => {
+                let _ = vfs::close(vfs_fd);
+                0
+            }
+            Err(e) => -(e as i64),
         }
-        let _ = vfs::close(fd_entry.vfs_fd);
-        fd_entry.is_open = false;
-        0
     }
 }
 
 fn sys_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
     let fd_idx = fd as usize;
-    if fd_idx < 3 || fd_idx >= MAX_USER_FDS {
-        return -9; // -EBADF
-    }
-
     unsafe {
-        let fd_entry = &mut USER_FD_TABLE[fd_idx];
-        if !fd_entry.is_open {
-            return -9; // -EBADF
-        }
+        let proc_ptr = &raw mut loader::CURRENT_PROCESS;
+        let Some(ref mut proc) = *proc_ptr else {
+            return -14; // -EFAULT
+        };
+
+        let fd_entry = match proc.fd_table.get_mut(fd_idx) {
+            Ok(entry) => entry,
+            Err(e) => return -(e as i64),
+        };
 
         let cur_off = fd_entry.offset as i64;
         let new_off = match whence {
@@ -524,27 +535,12 @@ fn sys_brk(new_brk: u64) -> i64 {
 }
 
 fn sys_stat(path_ptr: *const u8, _statbuf: *mut u8) -> i64 {
-    if path_ptr as u64 >= USER_SPACE_LIMIT {
-        return -14; // -EFAULT
-    }
-
-    let mut len = 0;
-    while len < 256 {
-        unsafe {
-            if *path_ptr.add(len) == 0 {
-                break;
-            }
-        }
-        len += 1;
-    }
-
-    let slice = unsafe { core::slice::from_raw_parts(path_ptr, len) };
-    let path = match core::str::from_utf8(slice) {
+    let path = match copy_cstr_from_user(path_ptr, 256) {
         Ok(s) => s,
-        Err(_) => return -22,
+        Err(e) => return -(e as i64),
     };
 
-    match vfs::stat(path) {
+    match vfs::stat(&path) {
         Ok(_) => 0,
         Err(e) => -(e as i64),
     }
@@ -555,20 +551,32 @@ fn sys_getpid() -> i64 {
 }
 
 fn sys_uname(buf: *mut UtsName) -> i64 {
-    if buf as u64 >= USER_SPACE_LIMIT {
-        return -14; // -EFAULT
-    }
+    let mut uts = UtsName {
+        sysname: [0; 65],
+        nodename: [0; 65],
+        release: [0; 65],
+        version: [0; 65],
+        machine: [0; 65],
+        domainname: [0; 65],
+    };
+    copy_cstr(&mut uts.sysname, b"OptiOS");
+    copy_cstr(&mut uts.nodename, b"optios");
+    copy_cstr(&mut uts.release, b"0.10.0-alpha");
+    copy_cstr(&mut uts.version, b"Milestone 10 (SATA AHCI, FAT32 VFS & Ring 3)");
+    copy_cstr(&mut uts.machine, b"x86_64");
+    copy_cstr(&mut uts.domainname, b"local");
 
-    unsafe {
-        let uts = &mut *buf;
-        copy_cstr(&mut uts.sysname, b"OptiOS");
-        copy_cstr(&mut uts.nodename, b"optios");
-        copy_cstr(&mut uts.release, b"1.0.0");
-        copy_cstr(&mut uts.version, b"Milestone 9 (PS/2 Mouse & Desktop Window Manager)");
-        copy_cstr(&mut uts.machine, b"x86_64");
-        copy_cstr(&mut uts.domainname, b"local");
+    let uts_slice = unsafe {
+        core::slice::from_raw_parts(
+            &uts as *const UtsName as *const u8,
+            core::mem::size_of::<UtsName>(),
+        )
+    };
+
+    match copy_to_user(buf as *mut u8, uts_slice) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
     }
-    0
 }
 
 fn copy_cstr(dst: &mut [u8; 65], src: &[u8]) {
