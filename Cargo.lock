@@ -22,17 +22,26 @@ name = "optios-ahci-proto"
 version = "0.1.0"
 
 [[package]]
+name = "optios-elf-loader"
+version = "0.1.0"
+
+[[package]]
 name = "optios-kernel"
 version = "0.1.0"
 dependencies = [
  "limine",
  "optios-ahci-proto",
+ "optios-elf-loader",
  "optios-partition-table",
  "optios-ustar",
 ]
 
 [[package]]
 name = "optios-partition-table"
+version = "0.1.0"
+
+[[package]]
+name = "optios-sysinfo"
 version = "0.1.0"
 
 [[package]]

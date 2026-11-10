@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Physical Memory Manager (Bitmap Frame Allocator)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Physical Memory Manager (PMM) based on a Bitmap Frame Allocator.
 //! Manages 4 KiB physical page frames across usable memory regions.
@@ -112,6 +112,7 @@ impl PhysicalMemoryManager {
     }
 
     /// Frees a previously allocated 4 KiB physical page frame.
+    #[allow(dead_code)]
     pub fn free_frame(&mut self, phys_addr: u64) {
         let frame = (phys_addr / PAGE_SIZE) as usize;
         if frame >= LOW_MEMORY_RESERVED_FRAMES && frame < self.total_frames && self.test_bit(frame) {
@@ -262,6 +263,7 @@ pub fn alloc_frame() -> Option<u64> {
 }
 
 /// Frees a 4 KiB physical page frame with synchronization.
+#[allow(dead_code)]
 pub fn free_frame(phys_addr: u64) {
     while PMM_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         core::hint::spin_loop();
@@ -302,6 +304,7 @@ pub fn get_stats() -> PmmStats {
 }
 
 /// Performs a diagnostic allocation test of 3 consecutive frames.
+#[allow(dead_code)]
 pub fn test_frame_allocation() -> bool {
     let f1 = alloc_frame();
     let f2 = alloc_frame();

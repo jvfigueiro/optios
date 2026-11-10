@@ -15,22 +15,28 @@ OptiOS is an independent, 64-bit operating system developed from scratch in Rust
 - `libs/ustar/`: Pure, hardened USTAR archive parser for the initial ramdisk (initramfs).
 - `libs/ahci-proto/`: Pure AHCI 1.0/1.3 protocol structures, bitfield builders, S.M.A.R.T. parser, and `BlockDevice` trait.
 - `libs/partition-table/`: Pure, hardened MBR and GPT partition table parsers with CRC32 integrity validation.
+- `libs/elf-loader/`: Pure, hardened ELF64 binary parser and `PT_LOAD` segment validator.
+- `userland/`: Standalone unprivileged Ring 3 binaries (e.g., `userland/sysinfo`).
 - `scripts/`: Build, packaging, host testing, disk formatting, and QEMU execution scripts.
 - `docs/`: Technical architecture, locking, POSIX semantics, and Architectural Decision Records (ADRs).
 
-## Milestone 6 Capabilities
+## Milestone 7 Capabilities
 
-- **SATA AHCI Storage & DMA Engine:** Read-only drive discovery, ATA `IDENTIFY DEVICE` (`0xEC`), ATA `READ DMA EXT` (`0x25` LBA48), and ATA `SMART READ DATA` (`0xB0` / `0xD0`) interrogation. Sector reads are chunked in 8-sector (4 KiB) transactions referencing dedicated single physical page frames. Strict read-only safety is guaranteed by construction through `AllowedCommand`.
+- **Pure Fullscreen Text Console (`/dev/tty0` Style):** Replaces kernel GUI dashboards with a classical, high-contrast text terminal (160x50 characters at 1280x800) rendered over linear GOP video with 4 MiB RAM double buffering and hardware/software row scrolling.
+- **Boot Verbose on Screen & COM1:** Real-time synchronized kernel logging across video display and COM1 serial console, complete with an in-memory `dmesg` ring buffer.
+- **Ring 3 Unprivileged Userland Execution:** AMD64 hardware MSRs (`IA32_EFER.SCE`, `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`) configured for `syscall`/`sysretq` dispatch. Unprivileged execution occurs in Ring 3 (`CS=0x23`, `SS=0x1B`) isolated from Ring 0 with a dedicated TSS `rsp[0]` kernel stack.
+- **POSIX System Call Subsystem:** Implements core POSIX system calls: `sys_read` (0), `sys_write` (1), `sys_open` (2), `sys_close` (3), `sys_stat` (4), `sys_getpid` (39), `sys_exit` (60), and `sys_uname` (63) with strict `< 0x0000_8000_0000_0000` memory bounds validation.
+- **ELF64 Loader (`libs/elf-loader`):** Standalone library parsing ELF64 headers and `PT_LOAD` segments with comprehensive unit tests and zero-fill BSS support.
+- **Ring 3 Userland Utility (`/bin/sysinfo`):** Standalone `no_std` Rust binary packaged inside `/boot/initramfs.tar` verifying Ring 3 execution and syscall interoperation.
+- **SATA AHCI Storage & DMA Engine:** Read-only drive discovery, ATA `IDENTIFY DEVICE` (`0xEC`), ATA `READ DMA EXT` (`0x25` LBA48), and ATA `SMART READ DATA` (`0xB0` / `0xD0`) interrogation. Strict read-only safety is guaranteed by construction through `AllowedCommand`.
 - **Partition Discovery (MBR/GPT):** Discovers Protective MBR (`0xEE`) and parses GUID Partition Tables (GPT) with IEEE 802.3 CRC32 header and entry array validation and UTF-16LE partition label decoding.
-- **RAM Double Buffering:** Eliminates visual tearing on the UEFI GOP linear framebuffer by allocating 4000 KiB from PMM mapped at `0xFFFF_D800_0000_0000`, flushing to physical MMIO via 64-bit word transfers on `present()`.
-- **Interactive Diagnostic Shell (`opti-sh`):** Accessible via Tab 5 / `F5`, featuring line editing, history navigation, scrollback, and 12 built-in diagnostic commands (`help`, `uname`/`ver`, `ls`, `cat`, `stat`, `lspci`, `lsblk`, `smart`, `free`/`meminfo`, `smbios`, `clear`, `uptime`).
-- **POSIX VFS & Initramfs:** In-memory read-only filesystem mounted at `/` backed by the bootloader-provided USTAR initramfs archive.
+- **Interactive Diagnostic Shell (`opti-sh`):** Featuring line editing, history navigation, scrollback, external ELF binary execution, and built-in diagnostic commands (`help`, `uname`, `ls`, `cat`, `stat`, `lspci`, `lsblk`, `smart`, `free`, `smbios`, `dmesg`, `clear`, `uptime`). Prompt: `optios - # `.
 
 ## Testing
 
 ### Host Unit Tests
 
-OptiOS separates pure protocol and parsing logic into host-testable library crates (`optios-ustar`, `optios-ahci-proto`, and `optios-partition-table`).
+OptiOS separates pure protocol and parsing logic into host-testable library crates (`optios-ustar`, `optios-ahci-proto`, `optios-partition-table`, and `optios-elf-loader`).
 
 To run host unit tests:
 
@@ -41,7 +47,7 @@ To run host unit tests:
 Or invoke `cargo test` directly for library crates:
 
 ```bash
-cargo test -p optios-ustar -p optios-ahci-proto -p optios-partition-table --target x86_64-unknown-linux-gnu
+cargo test -p optios-ustar -p optios-ahci-proto -p optios-partition-table -p optios-elf-loader --target x86_64-unknown-linux-gnu
 ```
 
 > **Note on Whole-Workspace `cargo test`:**

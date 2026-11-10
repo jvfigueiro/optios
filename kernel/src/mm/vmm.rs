@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Virtual Memory Manager (4-Level Paging & Uncached MMIO Mapping)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Virtual Memory Manager (VMM) and x86-64 4-Level Paging for OptiOS.
 
@@ -83,8 +83,10 @@ pub fn init(hhdm: u64) {
 }
 
 /// Helper function to traverse or create the next page table level.
-fn get_or_create_next_table(entry: &mut u64) -> Option<*mut PageTable> {
+fn get_or_create_next_table(entry: &mut u64, is_user: bool) -> Option<*mut PageTable> {
+    let user_flag = if is_user { flags::USER_ACCESSIBLE } else { 0 };
     if (*entry & flags::PRESENT) != 0 {
+        *entry |= user_flag;
         let next_phys = *entry & ENTRY_PHYS_MASK;
         Some(phys_to_virt::<PageTable>(next_phys))
     } else {
@@ -94,8 +96,8 @@ fn get_or_create_next_table(entry: &mut u64) -> Option<*mut PageTable> {
         unsafe {
             (*table_ptr).zero();
         }
-        // Intermediate tables inherit Present + Writable
-        *entry = frame | flags::PRESENT | flags::WRITABLE;
+        // Intermediate tables inherit Present + Writable (+ User if requested)
+        *entry = frame | flags::PRESENT | flags::WRITABLE | user_flag;
         Some(table_ptr)
     }
 }
@@ -114,9 +116,11 @@ pub fn map_page(virt_addr: u64, phys_addr: u64, page_flags: u64) -> Result<(), &
     let pd_idx = ((virt_addr >> 21) & 0x1FF) as usize;
     let pt_idx = ((virt_addr >> 12) & 0x1FF) as usize;
 
+    let is_user = (page_flags & flags::USER_ACCESSIBLE) != 0;
+
     let res = unsafe {
         let pml4 = &mut *pml4_virt;
-        let pdpt_ptr = match get_or_create_next_table(&mut pml4.entries[pml4_idx]) {
+        let pdpt_ptr = match get_or_create_next_table(&mut pml4.entries[pml4_idx], is_user) {
             Some(p) => p,
             None => {
                 VMM_LOCK.store(false, Ordering::Release);
@@ -125,7 +129,7 @@ pub fn map_page(virt_addr: u64, phys_addr: u64, page_flags: u64) -> Result<(), &
         };
 
         let pdpt = &mut *pdpt_ptr;
-        let pd_ptr = match get_or_create_next_table(&mut pdpt.entries[pdpt_idx]) {
+        let pd_ptr = match get_or_create_next_table(&mut pdpt.entries[pdpt_idx], is_user) {
             Some(p) => p,
             None => {
                 VMM_LOCK.store(false, Ordering::Release);
@@ -134,7 +138,7 @@ pub fn map_page(virt_addr: u64, phys_addr: u64, page_flags: u64) -> Result<(), &
         };
 
         let pd = &mut *pd_ptr;
-        let pt_ptr = match get_or_create_next_table(&mut pd.entries[pd_idx]) {
+        let pt_ptr = match get_or_create_next_table(&mut pd.entries[pd_idx], is_user) {
             Some(p) => p,
             None => {
                 VMM_LOCK.store(false, Ordering::Release);
@@ -279,6 +283,7 @@ pub fn map_mmio(phys_addr: u64, size: usize) -> Result<u64, &'static str> {
 }
 
 /// Executes a self-test of virtual page mapping, writing, reading, and translation.
+#[allow(dead_code)]
 pub fn test_vmm_mapping() -> bool {
     // Pick an unused canonical higher-half test address
     let test_virt: u64 = 0xFFFF_A000_0000_0000;

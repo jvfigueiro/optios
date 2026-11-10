@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: 8253/8254 Programmable Interval Timer (PIT) 100 Hz Driver
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! 8253/8254 Programmable Interval Timer (PIT) driver.
 //! Configured at 100 Hz (10 ms per tick) on Channel 0 (IRQ 0 / Vector 32).
@@ -51,6 +51,7 @@ pub fn ticks() -> u64 {
 
 /// Returns the system uptime in milliseconds.
 #[inline]
+#[allow(dead_code)]
 pub fn uptime_ms() -> u64 {
     ticks() * (1000 / TIMER_HZ as u64)
 }

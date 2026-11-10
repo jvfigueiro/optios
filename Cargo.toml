@@ -4,6 +4,8 @@ members = [
     "libs/ustar",
     "libs/ahci-proto",
     "libs/partition-table",
+    "libs/elf-loader",
+    "userland/sysinfo",
 ]
 resolver = "2"
 

@@ -20,46 +20,50 @@ The kernel is structured in modular layers with strict boundaries:
 ```
 +--------------------------------------------------------+
 |                     User Space                         |
-|      (Diagnostic Tools, GUI, Modular Applications)     |
+|     (Unprivileged Ring 3: /bin/sysinfo, ELF64 tools)   |
 +--------------------------------------------------------+
                            |
-                           v  (Interactive Diagnostics / Future Syscalls)
+                           v  (POSIX System Calls: SYS_READ, WRITE, OPEN, STAT, EXIT, UNAME)
 +--------------------------------------------------------+
-|             Interactive Shell & Diagnostics            |
-|        - opti-sh (Tab 5): 12 Built-in Commands         |
-|        - Line Editor, History & Monospace Terminal     |
+|             Interactive Shell & Terminal               |
+|     - opti-sh: Prompt 'optios - # ', 13 Commands       |
+|     - Fullscreen Text Console (/dev/tty0 Style)        |
+|     - Hardware / Software Video Scrolling & dmesg      |
 +--------------------------------------------------------+
 |              POSIX & Virtual File System               |
-|        - POSIX.1-2024 Errno & KernelResult<T>          |
-|        - Virtual File System (vfs::open/read/stat/ls)  |
-|        - USTAR Initramfs Driver (libs/ustar at /)      |
+|     - POSIX.1-2024 Errno & KernelResult<T>             |
+|     - Virtual File System (vfs::open/read/stat/ls)     |
+|     - USTAR Initramfs Driver (libs/ustar at /)         |
+|     - ELF64 Binary Loader (libs/elf-loader)            |
 +--------------------------------------------------------+
 |             Storage & Partition Management             |
-|        - BlockDevice Trait (libs/ahci-proto)           |
-|        - MBR & GPT Pure Parsers (libs/partition-table) |
-|        - SATA AHCI DMA Sector Reads (READ DMA EXT)     |
-|        - S.M.A.R.T. Health Telemetry (SMART READ DATA) |
+|     - BlockDevice Trait (libs/ahci-proto)              |
+|     - MBR & GPT Pure Parsers (libs/partition-table)    |
+|     - SATA AHCI DMA Sector Reads (READ DMA EXT)        |
+|     - S.M.A.R.T. Health Telemetry (SMART READ DATA)    |
 +--------------------------------------------------------+
 |             Memory Management (mm)                     |
-|        - Physical Memory Manager (PMM - Bitmap)        |
-|        - Virtual Memory / 4-Level Paging (VMM + MMIO)  |
-|        - IrqSafe Kernel Heap Allocator (Rust alloc)    |
-|        - Video RAM Backbuffer (0xFFFF_D800_0000_0000)  |
+|     - Physical Memory Manager (PMM - Bitmap)           |
+|     - Virtual Memory / 4-Level Paging (VMM + MMIO)     |
+|     - User-Accessible Page Table Propagation           |
+|     - IrqSafe Kernel Heap Allocator (Rust alloc)       |
+|     - Video RAM Backbuffer (0xFFFF_D800_0000_0000)     |
 +--------------------------------------------------------+
 |            Firmware & Hardware Discovery               |
-|        - SMBIOS / DMI 2.x & 3.x Structure Parser       |
-|        - PCI / PCIe Configuration Space Scanner (0..255)|
+|     - SMBIOS / DMI 2.x & 3.x Structure Parser          |
+|     - PCI / PCIe Configuration Space Scanner (0..255)  |
 +--------------------------------------------------------+
 |                  Drivers & I/O                         |
-|        - Serial Console (16550 UART)                   |
-|        - Framebuffer GOP with RAM Double Buffering     |
-|        - PS/2 Keyboard (IRQ 1 / Lock-Free Ring Buffer) |
-|        - SATA AHCI 1.0/1.3 Read-Only Storage Driver    |
+|     - Serial Console (16550 UART)                      |
+|     - Framebuffer GOP with RAM Double Buffering        |
+|     - PS/2 Keyboard (IRQ 1 / Lock-Free Ring Buffer)    |
+|     - SATA AHCI 1.0/1.3 Read-Only Storage Driver       |
 +--------------------------------------------------------+
 |              Architecture Abstraction                  |
-|        - arch/x86_64: I/O Ports, CPUID, GDT/TSS, IDT   |
-|        - arch/x86_64: Dual 8259 PIC & 100 Hz PIT Timer |
-|        - boot/: Limine Protocol Interface & Parsing    |
+|     - arch/x86_64: I/O Ports, CPUID, GDT/TSS, IDT      |
+|     - arch/x86_64: MSRs (IA32_EFER, STAR, LSTAR, FMASK)|
+|     - arch/x86_64: Dual 8259 PIC & 100 Hz PIT Timer    |
+|     - boot/: Limine Protocol Interface & Parsing       |
 +--------------------------------------------------------+
 ```
 
@@ -85,11 +89,13 @@ The kernel is structured in modular layers with strict boundaries:
    - Remaps the Dual 8259 PIC to vectors `32..47`, configures the PIT Channel 0 timer at 100 Hz, and initializes the PS/2 keyboard driver;
    - Initializes the SATA AHCI controller, discovers attached drives, executes ATA `IDENTIFY DEVICE`, reads S.M.A.R.T. health data, reads LBA 0/1 to parse Protective MBR and GPT partitions via `libs/partition-table`;
    - Allocates 4000 KiB from PMM for the Framebuffer backbuffer, enabling tear-free RAM double buffering;
-   - Initializes the `opti-sh` interactive diagnostic shell;
-   - Renders the 5-tab interactive diagnostic dashboard and enters the interrupt-driven (`sti` + `hlt`) event loop.
+   - Initializes the Fullscreen Classical Text Console (/dev/tty0 style, 160x50 at 1280x800);
+   - Configures AMD64 Syscall MSRs (IA32_EFER, STAR, LSTAR, FMASK) and TSS dedicated kernel stack;
+   - Initializes the `opti-sh` interactive diagnostic shell with MOTD banner;
+   - Enters the fullscreen console interactive event loop and waits for keyboard interrupts (`sti` + `hlt`).
 
 ## 4. Debugging and Logging Strategy
 
-- **Serial Console (COM1 - 0x3F8):** Primary low-level telemetry channel. Operates without heap allocations or GPU drivers.
-- **Framebuffer:** Primary user visual diagnostic console with 5 selectable views (System, PCI, Memory, Storage/SMART, Shell).
-- **QEMU Telemetry:** Serial redirected to file/stdio; automated screendump verification.
+- **Serial Console (COM1 - 0x3F8):** Low-level hardware telemetry channel (115200 baud 8N1). Operates without heap allocations or GPU drivers.
+- **Fullscreen Framebuffer Console:** Primary text terminal with 160x50 character grid, automatic line scrolling, and `dmesg` ring buffer.
+- **QEMU Telemetry:** Serial redirected to file/stdio; automated keystroke injection and screendump verification.

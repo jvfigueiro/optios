@@ -43,6 +43,17 @@ fi
 
 echo "==> [OptiOS Build] Kernel compiled: ${KERNEL_BIN}"
 
+# 1.1 Compile Ring 3 Userland Utility (/bin/sysinfo)
+echo "==> [OptiOS Build] Compiling Ring 3 userland utilities..."
+RUSTFLAGS="-C relocation-model=static -C link-arg=-Tuserland/linker.ld -C link-arg=-nostdlib -C link-arg=-static -C link-arg=-z -C link-arg=max-page-size=0x1000" \
+    cargo build --package optios-sysinfo --release --target "${TARGET}"
+SYSINFO_BIN="${PROJECT_ROOT}/target/${TARGET}/release/optios-sysinfo"
+
+if [ ! -f "${SYSINFO_BIN}" ]; then
+    echo "ERROR: Userland binary not found at ${SYSINFO_BIN}" >&2
+    exit 1
+fi
+
 # 2. Provision Limine UEFI binaries if not present
 if [ ! -f "${LIMINE_DIR}/BOOTX64.EFI" ] || [ ! -f "${LIMINE_DIR}/limine-uefi-cd.bin" ]; then
     echo "==> [OptiOS Build] Cloning official Limine UEFI binaries (v8.x-binary)..."
@@ -52,22 +63,25 @@ fi
 
 # 3. Generate USTAR Initramfs archive (/boot/initramfs.tar)
 rm -rf "${INITRAMFS_STAGE}"
-mkdir -p "${INITRAMFS_STAGE}/etc" "${INITRAMFS_STAGE}/usr/share/hwdata"
+mkdir -p "${INITRAMFS_STAGE}/etc" "${INITRAMFS_STAGE}/bin" "${INITRAMFS_STAGE}/usr/share/hwdata"
+
+cp "${SYSINFO_BIN}" "${INITRAMFS_STAGE}/bin/sysinfo"
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/optios-release"
 NAME="OptiOS"
-VERSION="0.5.0-alpha (Milestone 5)"
+VERSION="1.0.0-alpha (Milestone 7)"
 ID=optios
 ARCH="x86_64"
 FIRMWARE="UEFI"
 BOOTLOADER="Limine v8.x"
 VFS_ROOT="USTAR Initramfs (Read-Only)"
 STORAGE_STACK="SATA AHCI 1.0 DMA + S.M.A.R.T. Telemetry"
+USERLAND="Ring 3 (Syscalls & ELF64)"
 EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/motd"
-Welcome to OptiOS Live Diagnostic & Recovery Environment!
-All attached storage controllers operate in strict Read-Only forensic mode.
+OptiOS 1.0
+Copyright (C) 2026 Joao Figueiro. All Rights Reserved.
 EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/usr/share/hwdata/pci.ids"
@@ -97,7 +111,8 @@ tar --format=ustar -cf "${ISO_ROOT}/boot/initramfs.tar" -C "${INITRAMFS_STAGE}" 
     etc/optios-release \
     etc/motd \
     etc/diag-manifest.conf \
-    usr/share/hwdata/pci.ids
+    usr/share/hwdata/pci.ids \
+    bin/sysinfo
 
 echo "==> [OptiOS Build] USTAR Initramfs created: ${ISO_ROOT}/boot/initramfs.tar"
 

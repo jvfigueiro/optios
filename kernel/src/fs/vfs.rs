@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: POSIX Virtual File System (VFS) Core Interface
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Virtual File System (VFS) interface providing POSIX-like `open`, `read`, `stat`, and `list_dir`
 //! primitives over the in-memory USTAR Initramfs mounted at `/`.
@@ -198,6 +198,7 @@ pub fn list_dir(dir_path: &str) -> KernelResult<Vec<VfsStat>> {
 }
 
 /// Helper that opens, stats, and reads an entire text file into a `String` using the POSIX VFS API.
+#[allow(dead_code)]
 pub fn read_to_string(path: &str) -> KernelResult<String> {
     let fd = open(path)?;
     let st = stat(path)?;

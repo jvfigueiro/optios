@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: PCI/PCIe Configuration Space Scanner & Bus Mastering Control
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! PCI Bus Enumeration Driver using I/O configuration ports (0xCF8 / 0xCFC).
 //! Scans buses 0..=255 with Multi-Function detection and BAR0..BAR5 inspection.
@@ -83,6 +83,7 @@ impl PciDevice {
     }
 
     /// Returns the first non-zero Base Address Register (BAR) and its index, if any.
+    #[allow(dead_code)]
     pub fn primary_bar(&self) -> Option<(usize, u32)> {
         for (i, &bar) in self.bars.iter().enumerate() {
             let masked = if (bar & 1) != 0 {

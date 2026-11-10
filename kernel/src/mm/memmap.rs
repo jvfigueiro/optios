@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: UEFI / Limine Physical Memory Map Parser
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Physical memory map parsing and accounting for OptiOS.
 
@@ -18,16 +18,19 @@ pub struct MemoryStats {
     /// Memory reserved by firmware/hardware MMIO (bytes).
     pub reserved_bytes: u64,
     /// Total number of memory regions provided by the bootloader.
+    #[allow(dead_code)]
     pub entry_count: usize,
 }
 
 impl MemoryStats {
     /// Usable physical RAM in MiB.
+    #[allow(dead_code)]
     pub fn usable_mib(&self) -> u64 {
         self.usable_bytes / (1024 * 1024)
     }
 
     /// Total physical RAM installed in MiB.
+    #[allow(dead_code)]
     pub fn total_ram_mib(&self) -> u64 {
         self.total_ram_bytes / (1024 * 1024)
     }

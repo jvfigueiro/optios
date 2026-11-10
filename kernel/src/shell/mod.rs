@@ -1,11 +1,11 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
-// Item: Interactive Diagnostic Shell (opti-sh)
+// Item: Fullscreen Interactive Diagnostic Terminal (opti-sh)
 // Date: 2026-11-10
 
-//! Interactive Diagnostic Shell (`opti-sh`) for OptiOS.
-//! Provides interactive command-line diagnostics, line editing, command history,
-//! and integration with VFS, AHCI, PCI, SMBIOS, PMM, and Kernel Heap telemetry.
+//! Fullscreen Interactive Diagnostic Terminal (`opti-sh`) for OptiOS.
+//! Provides command-line hardware diagnostics, line editing, command history,
+//! execution of built-in inspection commands, and execution of Ring 3 ELF64 userland binaries.
 
 extern crate alloc;
 use alloc::format;
@@ -17,76 +17,79 @@ use crate::arch::x86_64::pit;
 use crate::drivers::ahci;
 use crate::drivers::keyboard::KeyEvent;
 use crate::drivers::pci;
-use crate::drivers::video::framebuffer::FramebufferDriver;
+use crate::drivers::video::console;
 use crate::firmware::smbios;
 use crate::fs::vfs;
 use crate::info;
 use crate::mm::{heap, pmm};
 
-pub const PROMPT: &str = "optios# ";
-pub const MAX_SCROLLBACK_LINES: usize = 120;
+pub const PROMPT: &str = "optios - # ";
 
-/// Interactive diagnostic shell instance.
+/// Interactive terminal shell state.
 pub struct Shell {
     pub input_buffer: String,
     pub last_command: String,
-    pub scrollback: Vec<String>,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        let mut sh = Self {
+        Self {
             input_buffer: String::new(),
             last_command: String::new(),
-            scrollback: Vec::new(),
-        };
-        sh.scrollback
-            .push(String::from("OptiOS Diagnostic Shell (opti-sh v0.6.0)"));
-        sh.scrollback.push(String::from(
-            "Type 'help' for a list of diagnostic commands, or switch tabs with F1..F5.",
-        ));
-        sh.scrollback.push(String::new());
-        sh
+        }
     }
 
-    /// Handles keyboard events when the Shell tab is active.
+    /// Initializes the shell terminal session with the MOTD and prompt.
+    pub fn init_session(&self) {
+        console::print_str("\nOptiOS 1.0\n");
+        console::print_str("Copyright (C) 2026 Joao Figueiro. All Rights Reserved.\n\n");
+        console::print_str(PROMPT);
+    }
+
+    /// Handles keyboard events from the PS/2 ring buffer.
     pub fn handle_key(&mut self, key: KeyEvent) {
         match key {
             KeyEvent::Char(c) => {
-                if self.input_buffer.len() < 80 {
+                if self.input_buffer.len() < 120 {
                     self.input_buffer.push(c);
+                    let mut s = [0u8; 4];
+                    let enc = c.encode_utf8(&mut s);
+                    console::print_str(enc);
                 }
             }
             KeyEvent::Backspace => {
-                self.input_buffer.pop();
+                if self.input_buffer.pop().is_some() {
+                    console::print_str("\x08");
+                }
             }
             KeyEvent::ArrowUp => {
                 if !self.last_command.is_empty() {
+                    // Erase current line in console
+                    for _ in 0..self.input_buffer.len() {
+                        console::print_str("\x08");
+                    }
                     self.input_buffer = self.last_command.clone();
+                    console::print_str(&self.input_buffer);
                 }
             }
             KeyEvent::Enter => {
-                let cmd_line = self.input_buffer.clone();
-                self.input_buffer.clear();
+                console::print_str("\n");
+                let cmd_line = core::mem::take(&mut self.input_buffer);
                 self.execute_line(&cmd_line);
+                console::print_str(PROMPT);
             }
             _ => {}
         }
     }
 
-    /// Appends a line to the shell scrollback buffer.
-    pub fn println(&mut self, line: &str) {
-        self.scrollback.push(String::from(line));
-        if self.scrollback.len() > MAX_SCROLLBACK_LINES {
-            self.scrollback.remove(0);
-        }
+    /// Prints a line of text to the fullscreen console and serial port.
+    pub fn println(&self, line: &str) {
+        console::print_str(line);
+        console::print_str("\n");
     }
 
     /// Parses and executes a command line.
     pub fn execute_line(&mut self, line: &str) {
-        let prompt_line = format!("{}{}", PROMPT, line);
-        self.println(&prompt_line);
-
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return;
@@ -110,22 +113,17 @@ impl Shell {
             "smart" => self.cmd_smart(&args),
             "free" | "meminfo" => self.cmd_free(),
             "smbios" => self.cmd_smbios(),
-            "clear" => self.scrollback.clear(),
+            "dmesg" => self.cmd_dmesg(),
+            "clear" => console::clear(),
             "uptime" => self.cmd_uptime(),
-            _ => {
-                let err_msg = format!(
-                    "opti-sh: {}: command not found. Type 'help' for available commands.",
-                    cmd
-                );
-                self.println(&err_msg);
-            }
+            _ => self.cmd_external(cmd, &args),
         }
     }
 
-    fn cmd_help(&mut self) {
+    fn cmd_help(&self) {
         self.println("Available opti-sh commands:");
         self.println("  help            - Display this list of available commands");
-        self.println("  uname [-a]      - Display kernel name, architecture and build date");
+        self.println("  uname [-a]      - Display kernel release, architecture and build info");
         self.println("  ver             - Alias for 'uname'");
         self.println("  ls [path]       - List files and directories in VFS (default: /)");
         self.println("  cat <path>      - Read and display file contents from VFS");
@@ -135,15 +133,24 @@ impl Shell {
         self.println("  smart [port]    - Display S.M.A.R.T. health telemetry for an AHCI port");
         self.println("  free / meminfo  - Display real-time PMM and Kernel Heap usage statistics");
         self.println("  smbios          - Display BIOS/UEFI firmware and system motherboard info");
-        self.println("  clear           - Clear terminal scrollback buffer");
+        self.println("  dmesg           - Display kernel boot log and hardware detection messages");
+        self.println("  clear           - Clear terminal screen");
         self.println("  uptime          - Display system uptime and PIT timer tick count");
+        self.println("  <prog>          - Execute userland ELF64 executable from VFS (e.g. sysinfo)");
     }
 
-    fn cmd_uname(&mut self, _args: &[&str]) {
-        self.println("OptiOS 0.6.0-alpha (x86_64 UEFI) #1 Tue Nov 10 2026 x86_64 GNU/None");
+    fn cmd_uname(&self, _args: &[&str]) {
+        self.println("OptiOS optios 1.0.0 Milestone 7 (Ring 3 Userland) x86_64 2026-11-10");
     }
 
-    fn cmd_ls(&mut self, args: &[&str]) {
+    fn cmd_dmesg(&self) {
+        let logs = console::get_dmesg();
+        for line in logs {
+            self.println(&line);
+        }
+    }
+
+    fn cmd_ls(&self, args: &[&str]) {
         let path = if !args.is_empty() { args[0] } else { "/" };
         match vfs::list_dir(path) {
             Ok(entries) => {
@@ -169,7 +176,7 @@ impl Shell {
         }
     }
 
-    fn cmd_cat(&mut self, args: &[&str]) {
+    fn cmd_cat(&self, args: &[&str]) {
         if args.is_empty() {
             self.println("cat: missing file operand");
             return;
@@ -201,7 +208,7 @@ impl Shell {
         }
     }
 
-    fn cmd_stat(&mut self, args: &[&str]) {
+    fn cmd_stat(&self, args: &[&str]) {
         if args.is_empty() {
             self.println("stat: missing file operand");
             return;
@@ -221,7 +228,7 @@ impl Shell {
         }
     }
 
-    fn cmd_lspci(&mut self) {
+    fn cmd_lspci(&self) {
         let devs = pci::scan_pci_bus();
         self.println(&format!(
             "PCI Scanner: {} device(s) enumerated:",
@@ -242,7 +249,7 @@ impl Shell {
         }
     }
 
-    fn cmd_lsblk(&mut self) {
+    fn cmd_lsblk(&self) {
         let ctrl_opt = ahci::get_controller_info();
         let Some(ctrl) = ctrl_opt else {
             self.println("lsblk: AHCI controller not found");
@@ -282,7 +289,7 @@ impl Shell {
         }
     }
 
-    fn cmd_smart(&mut self, args: &[&str]) {
+    fn cmd_smart(&self, args: &[&str]) {
         let target_port: u8 = if !args.is_empty() {
             args[0].parse().unwrap_or(0)
         } else {
@@ -355,7 +362,7 @@ impl Shell {
         }
     }
 
-    fn cmd_free(&mut self) {
+    fn cmd_free(&self) {
         let stats = pmm::get_stats();
         let total_kib = (stats.total_frames * 4096) / 1024;
         let free_kib = (stats.free_frames * 4096) / 1024;
@@ -377,7 +384,7 @@ impl Shell {
         ));
     }
 
-    fn cmd_smbios(&mut self) {
+    fn cmd_smbios(&self) {
         let smbios_opt = smbios::get_info();
         let Some(smbios_info) = smbios_opt else {
             self.println("smbios: SMBIOS table not detected");
@@ -406,7 +413,7 @@ impl Shell {
         self.println(&format!("Processor:    {}", cpu_info.as_str()));
     }
 
-    fn cmd_uptime(&mut self) {
+    fn cmd_uptime(&self) {
         let uptime_s = pit::uptime_seconds();
         let ticks = pit::ticks();
         self.println(&format!(
@@ -415,89 +422,33 @@ impl Shell {
         ));
     }
 
-    /// Renders the interactive shell inside the specified bounding box.
-    pub fn render(&self, fb: &mut FramebufferDriver, x: usize, y: usize, w: usize, h: usize) {
-        let term_bg = 0x000a0f1d;
-        let border_color = 0x0038bdf8;
-        let text_dim = 0x0094a3b8;
-        let text_white = 0x00f8fafc;
-        let text_green = 0x004ade80;
-        let title_bg = 0x001e293b;
-
-        // Terminal background and border
-        fb.fill_rect(x, y, w, h, term_bg);
-        fb.draw_rect_border(x, y, w, h, 2, border_color);
-
-        // Title bar
-        fb.fill_rect(x + 2, y + 2, w - 4, 24, title_bg);
-        fb.draw_string(
-            x + 12,
-            y + 6,
-            "OptiOS Diagnostic Terminal (opti-sh v0.6.0)",
-            text_white,
-            Some(title_bg),
-        );
-        fb.draw_string(
-            x + w - 260,
-            y + 6,
-            "[F1..F5: Tabs | Up: History]",
-            text_dim,
-            Some(title_bg),
-        );
-
-        let content_y = y + 32;
-        let content_h = h.saturating_sub(64);
-        let line_height = 18;
-        let max_visible = content_h / line_height;
-
-        let total_lines = self.scrollback.len();
-        let start_line = if total_lines > max_visible {
-            total_lines - max_visible
+    fn cmd_external(&self, cmd: &str, _args: &[&str]) {
+        let target_path = if cmd.starts_with('/') {
+            String::from(cmd)
         } else {
-            0
+            format!("/bin/{}", cmd)
         };
 
-        // Render scrollback lines
-        for (i, line_idx) in (start_line..total_lines).enumerate() {
-            let ly = content_y + (i * line_height);
-            let line_str = &self.scrollback[line_idx];
-            if line_str.starts_with(PROMPT) {
-                fb.draw_string(x + 10, ly, PROMPT, text_green, Some(term_bg));
-                fb.draw_string(
-                    x + 10 + PROMPT.len() * 8,
-                    ly,
-                    &line_str[PROMPT.len()..],
-                    text_white,
-                    Some(term_bg),
-                );
-            } else if line_str.starts_with("Available")
-                || line_str.starts_with("===")
-                || line_str.starts_with("NAME")
-            {
-                fb.draw_string(x + 10, ly, line_str, 0x00facc15, Some(term_bg));
-            } else if line_str.starts_with("  File:") || line_str.starts_with("  Size:") {
-                fb.draw_string(x + 10, ly, line_str, 0x0038bdf8, Some(term_bg));
-            } else {
-                fb.draw_string(x + 10, ly, line_str, text_dim, Some(term_bg));
+        if vfs::open(&target_path).is_ok() {
+            self.println(&format!(
+                "[opti-sh] Executing ELF64 binary '{}' in Ring 3 (Userland)...",
+                target_path
+            ));
+            match crate::syscall::loader::spawn_user_process(&target_path) {
+                Ok(status) => {
+                    if status != 0 {
+                        self.println(&format!("[opti-sh] Process exited with status {}", status));
+                    }
+                }
+                Err(err) => {
+                    self.println(&format!("opti-sh: failed to execute '{}': {}", target_path, err));
+                }
             }
+        } else {
+            self.println(&format!(
+                "opti-sh: {}: command not found. Type 'help' for available commands.",
+                cmd
+            ));
         }
-
-        // Render prompt and active input buffer at the bottom
-        let prompt_y = y + h - 26;
-        fb.fill_rect(x + 2, prompt_y - 2, w - 4, 24, 0x000f172a);
-        fb.draw_string(x + 10, prompt_y, PROMPT, text_green, Some(0x000f172a));
-
-        let input_x = x + 10 + (PROMPT.len() * 8);
-        fb.draw_string(
-            input_x,
-            prompt_y,
-            &self.input_buffer,
-            text_white,
-            Some(0x000f172a),
-        );
-
-        // Cursor
-        let cursor_x = input_x + (self.input_buffer.len() * 8);
-        fb.fill_rect(cursor_x, prompt_y, 8, 16, text_green);
     }
 }

@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: Global Descriptor Table (GDT) & Task State Segment (TSS)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Global Descriptor Table (GDT) and Task State Segment (TSS) for OptiOS x86-64.
 
@@ -52,6 +52,14 @@ static mut DOUBLE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; 16384]);
 
 /// Static kernel TSS instance.
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
+
+/// Updates TSS.rsp[0] with the dedicated kernel stack for Ring 3 -> Ring 0 transitions.
+pub fn set_kernel_stack(stack_top: u64) {
+    unsafe {
+        let tss_ptr = &raw mut TSS;
+        (*tss_ptr).rsp[0] = stack_top;
+    }
+}
 
 /// GDT Pointer structure loaded by `lgdt`.
 #[repr(C, packed)]

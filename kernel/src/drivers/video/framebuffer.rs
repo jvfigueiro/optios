@@ -225,6 +225,37 @@ impl FramebufferDriver {
             }
         }
     }
+
+    /// Scrolls the backbuffer up by a number of text lines (each 16 pixels high).
+    pub fn scroll_up(&mut self, text_lines: usize, bg_color: u32) {
+        let shift_pixels = text_lines * 16;
+        if shift_pixels >= self.height {
+            self.clear(bg_color);
+            return;
+        }
+
+        let shift_bytes = shift_pixels * self.pitch;
+        let total_bytes = self.height * self.pitch;
+        let copy_bytes = total_bytes - shift_bytes;
+
+        unsafe {
+            core::ptr::copy(
+                self.backbuffer.add(shift_bytes),
+                self.backbuffer,
+                copy_bytes,
+            );
+
+            // Blank the revealed bottom rows
+            let bottom_start_y = self.height - shift_pixels;
+            for y in bottom_start_y..self.height {
+                let row_ptr = self.backbuffer.add(y * self.pitch) as *mut u32;
+                let row_words = self.pitch / 4;
+                for x in 0..row_words {
+                    *row_ptr.add(x) = bg_color;
+                }
+            }
+        }
+    }
 }
 
 // Global emergency framebuffer state for panic and exception dumps

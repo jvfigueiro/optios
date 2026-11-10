@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: 16550 UART Serial Port Driver (COM1 - 0x3F8)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! 16550 UART Serial Port Driver (COM1 - 0x3F8).
 //! Primary low-level telemetry channel for early kernel debugging.
@@ -76,9 +76,11 @@ impl fmt::Write for SerialPort {
 /// Static COM1 serial port instance.
 pub static SERIAL1: SerialPort = SerialPort::new(COM1);
 
+#[allow(dead_code)]
 static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Thread-safe synchronized serial print function.
+#[allow(dead_code)]
 pub fn print_serial(args: fmt::Arguments) {
     use core::fmt::Write;
     while SERIAL_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {

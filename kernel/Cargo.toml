@@ -8,6 +8,7 @@ limine = "0.5.0"
 optios-ustar = { path = "../libs/ustar" }
 optios-ahci-proto = { path = "../libs/ahci-proto" }
 optios-partition-table = { path = "../libs/partition-table" }
+optios-elf-loader = { path = "../libs/elf-loader" }
 
 [features]
 default = []

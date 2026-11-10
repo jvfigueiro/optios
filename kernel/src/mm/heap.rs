@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: IrqSafe Kernel Heap Allocator (GlobalAlloc Free-List)
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! Kernel Heap Allocator implementing Rust's `GlobalAlloc`.
 //! Uses an IrqSafe Free-List Allocator with adjacent chunk coalescing.
@@ -261,6 +261,7 @@ pub fn init() {
 }
 
 /// Diagnostic self-test for dynamic memory allocation using Rust `alloc` collections.
+#[allow(dead_code)]
 pub fn test_heap_allocation() -> bool {
     extern crate alloc;
     use alloc::boxed::Box;

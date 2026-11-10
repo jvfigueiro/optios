@@ -1,7 +1,7 @@
 // OptiOS
 // Copyright (C) 2026 João Figueiró. All rights reserved
 // Item: x86-64 Architecture Support & Low-Level CPU Control
-// Date: 2026-11-09
+// Date: 2026-11-10
 
 //! x86-64 architecture support and low-level CPU control.
 
@@ -9,6 +9,7 @@ pub mod cpuid;
 pub mod gdt;
 pub mod idt;
 pub mod io;
+pub mod msr;
 pub mod pic;
 pub mod pit;
 
