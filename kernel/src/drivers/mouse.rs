@@ -214,6 +214,47 @@ pub fn on_irq12() {
     }
 }
 
+/// Updates mouse coordinates and button states from relative deltas (e.g. USB HID mouse).
+pub fn update_relative(dx: i32, dy: i32, btn_left: bool, btn_right: bool, btn_middle: bool) {
+    let cur = &raw mut CURRENT_MOUSE;
+    let mut new_x = unsafe { (*cur).x } + dx;
+    let mut new_y = unsafe { (*cur).y } + dy;
+
+    if new_x < 0 { new_x = 0; }
+    if new_x >= SCREEN_WIDTH { new_x = SCREEN_WIDTH - 1; }
+    if new_y < 0 { new_y = 0; }
+    if new_y >= SCREEN_HEIGHT { new_y = SCREEN_HEIGHT - 1; }
+
+    unsafe {
+        (*cur).x = new_x;
+        (*cur).y = new_y;
+        (*cur).btn_left = btn_left;
+        (*cur).btn_right = btn_right;
+        (*cur).btn_middle = btn_middle;
+    }
+
+    // Publish agnostic input events to Driver Kit queue
+    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::PointerMove { dx, dy });
+    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::PointerAbs {
+        x: new_x as u32,
+        y: new_y as u32,
+    });
+    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::MouseButton {
+        button: crate::drivers::kit::MouseButtonKind::Left,
+        pressed: btn_left,
+    });
+    crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::MouseButton {
+        button: crate::drivers::kit::MouseButtonKind::Right,
+        pressed: btn_right,
+    });
+    if btn_middle {
+        crate::drivers::kit::input::push_event(crate::drivers::kit::InputEvent::MouseButton {
+            button: crate::drivers::kit::MouseButtonKind::Middle,
+            pressed: true,
+        });
+    }
+}
+
 /// Returns a copy of the current mouse state.
 pub fn get_state() -> MouseState {
     while MOUSE_LOCK

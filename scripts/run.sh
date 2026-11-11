@@ -94,6 +94,13 @@ try:
         sock.sendall(f'sendkey {k}\n'.encode())
         time.sleep(0.08)
     time.sleep(0.8)
+    # 2.5 Inject USB mouse movement to generate live HID interrupt packets
+    sock.sendall(b'mouse_set 3\n')
+    time.sleep(0.1)
+    for _ in range(5):
+        sock.sendall(b'mouse_move 15 10\n')
+        time.sleep(0.05)
+    time.sleep(0.3)
     # 3. Send interactive command: /bin/cat /proc/usb
     for k in ['slash', 'b', 'i', 'n', 'slash', 'c', 'a', 't', 'spc', 'slash', 'p', 'r', 'o', 'c', 'slash', 'u', 's', 'b', 'ret']:
         sock.sendall(f'sendkey {k}\n'.encode())
@@ -167,6 +174,9 @@ finally:
     grep -q "xHCI Controller" "${SERIAL_LOG}" || { echo "FAILURE: xHCI controller discovery missing"; exit 1; }
     grep -q "xHCI: Command Ring DMA verified! CommandCompletionEvent received: Code=1" "${SERIAL_LOG}" || { echo "FAILURE: xHCI Command Ring DMA No-Op verification missing"; exit 1; }
     grep -q "xHCI Root Hub Port" "${SERIAL_LOG}" || { echo "FAILURE: xHCI Root Hub port enumeration missing"; exit 1; }
+    grep -q "Activated HID Boot Protocol" "${SERIAL_LOG}" || { echo "FAILURE: xHCI HID Boot Protocol activation missing"; exit 1; }
+    grep -q "Configured Endpoint 0x81 (DCI 3) for HID Interrupt IN" "${SERIAL_LOG}" || { echo "FAILURE: xHCI Endpoint DCI 3 configuration missing"; exit 1; }
+    grep -q "Live HID Boot report received" "${SERIAL_LOG}" || { echo "FAILURE: Live xHCI HID Boot report ingestion missing"; exit 1; }
     grep -q "Syscall subsystem initialized" "${SERIAL_LOG}" || { echo "FAILURE: Syscall subsystem initialization missing"; exit 1; }
     grep -q "OptiOS 1.0" "${SERIAL_LOG}" || { echo "FAILURE: OptiOS 1.0 MOTD header missing"; exit 1; }
     grep -q "Copyright (C) 2026 João Figueiró" "${SERIAL_LOG}" || grep -q "Copyright (C) 2026 Joao Figueiro" "${SERIAL_LOG}" || { echo "FAILURE: Copyright MOTD missing"; exit 1; }

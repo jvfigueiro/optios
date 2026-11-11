@@ -356,6 +356,7 @@ pub extern "C" fn _start() -> ! {
 
     // 19. Fullscreen Text Console Interactive Event Loop
     loop {
+        crate::drivers::xhci::poll_events();
         while let Some(key) = keyboard::poll_key() {
             shell.handle_key(key);
         }

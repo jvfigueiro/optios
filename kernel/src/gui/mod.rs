@@ -93,6 +93,8 @@ pub fn run_desktop() {
 
     // Desktop Interactive Event Loop
     loop {
+        crate::drivers::xhci::poll_events();
+
         // 1. Process keyboard inputs
         while let Some(key) = keyboard::poll_key() {
             match key {

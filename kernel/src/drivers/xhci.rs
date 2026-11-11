@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
-// Item: USB 3.0 xHCI Host Controller Native Driver (Slice U2)
+// Item: USB 3.0 xHCI Host Controller Native Driver (Slice U3)
 // Date: 2026-11-10
 
 //! USB 3.0 eXtensible Host Controller Interface (xHCI) Native Driver.
 //! Implements hardware initialization, BIOS/OS handoff, DMA ring setup,
 //! Command Ring No-Op verification, Root Hub port enumeration, Port Reset,
-//! Slot Addressing, and EP0 Device Descriptor Enumeration.
+//! Slot Addressing, EP0 Device Descriptor Enumeration, Endpoint Configuration,
+//! and Live USB HID Boot Protocol Input Event Ingestion.
 //! Strictly implemented using the OptiOS Driver Kit (`MmioRegion` & `DmaBuffer`).
 
 extern crate alloc;
@@ -50,6 +51,9 @@ pub struct XhciUsbDevice {
     pub interface_protocol: u8,
     pub configuration_val: u8,
     pub max_packet_size: u16,
+    pub endpoint_address: u8,
+    pub dci: u8,
+    pub configured: bool,
 }
 
 /// Discovered and initialized xHCI controller telemetry.
@@ -91,8 +95,9 @@ impl Diagnosable for XhciDiagnostic {
             if let Some(ref info) = XHCI_INFO {
                 let connected_count = info.ports.iter().filter(|p| p.connected).count();
                 let dev_count = info.devices.len();
+                let configured_count = info.devices.iter().filter(|d| d.configured).count();
                 format!(
-                    "PCI {:02x}:{:02x}.{}, v{:x}.{:02x}, Ports: {} total ({} connected), Devices: {}",
+                    "PCI {:02x}:{:02x}.{}, v{:x}.{:02x}, Ports: {} total ({} conn), Devices: {} ({} active)",
                     info.pci_bus,
                     info.pci_device,
                     info.pci_function,
@@ -100,7 +105,8 @@ impl Diagnosable for XhciDiagnostic {
                     info.hci_version & 0xFF,
                     info.max_ports,
                     connected_count,
-                    dev_count
+                    dev_count,
+                    configured_count
                 )
             } else {
                 String::from("No xHCI controller detected")
@@ -118,6 +124,27 @@ static mut XHCI_CMD_RING: Option<DmaBuffer> = None;
 static mut XHCI_EVENT_RING: Option<DmaBuffer> = None;
 static mut XHCI_ERST: Option<DmaBuffer> = None;
 static mut XHCI_DEVICE_BUFFERS: Option<Vec<DmaBuffer>> = None;
+
+/// Active configured HID endpoint state for runtime polling and event ingestion.
+#[allow(dead_code)]
+struct ActiveHidEndpoint {
+    slot_id: u8,
+    dci: u8,
+    endpoint_address: u8,
+    max_packet_size: u16,
+    is_mouse: bool,
+    is_keyboard: bool,
+    ep_ring: DmaBuffer,
+    hid_report_buf: DmaBuffer,
+    ep_idx: usize,
+    ep_cycle: bool,
+    reports_received: usize,
+}
+
+static mut ACTIVE_HID_ENDPOINTS: Option<Vec<ActiveHidEndpoint>> = None;
+static mut XHCI_DB_REGS: Option<MmioRegion> = None;
+static mut XHCI_INTR0: Option<MmioRegion> = None;
+static mut XHCI_ER_STATE: EventRingState = EventRingState { dequeue_idx: 0, cycle_state: true };
 
 /// Tracking state for Event Ring consumption.
 struct EventRingState {
@@ -241,8 +268,9 @@ fn send_control_transfer(
         *ep0_idx += 1;
     }
 
-    // Status Stage: direction OUT for Data IN stage, with IOC=true
-    let status_trb = build_status_stage_trb(false, cycle);
+    // Status Stage: direction OUT for Data IN stage, and direction IN for No-Data stage, with IOC=true
+    let status_dir_in = if data_len > 0 { false } else { true };
+    let status_trb = build_status_stage_trb(status_dir_in, cycle);
     let offset2 = *ep0_idx * 16;
     let status_bytes = unsafe {
         core::slice::from_raw_parts(&status_trb as *const Trb as *const u8, 16)
@@ -290,7 +318,91 @@ fn send_control_transfer(
     Ok(transferred)
 }
 
+/// Non-blocking polling function called from interactive console event loop and GUI.
+/// Checks the xHCI Event Ring for Transfer Events on configured HID Interrupt IN endpoints,
+/// decodes reports, publishes them to the agnostic input queue, and re-queues transfer TRBs.
+#[allow(static_mut_refs)]
+pub fn poll_events() {
+    unsafe {
+        let (Some(ref event_ring), Some(ref db_regs), Some(ref intr0), Some(ref mut active_eps)) = (
+            &XHCI_EVENT_RING,
+            &XHCI_DB_REGS,
+            &XHCI_INTR0,
+            &mut ACTIVE_HID_ENDPOINTS,
+        ) else {
+            return;
+        };
+
+        if active_eps.is_empty() {
+            return;
+        }
+
+        while let Some(ev) = next_event(event_ring, intr0, &mut XHCI_ER_STATE) {
+            if ev.trb_type() == TRB_TYPE_TRANSFER_EVENT {
+                let slot = ev.slot_id();
+                let ep_id = ev.endpoint_id();
+                let code = ev.completion_code();
+                if code == TRB_COMP_SUCCESS || code == TRB_COMP_SHORT_PACKET {
+                    if let Some(ep) = active_eps.iter_mut().find(|e| e.slot_id == slot && (e.dci == ep_id || ep_id == 0)) {
+                        let residual = (ev.status & 0x00FF_FFFF) as usize;
+                        let len = ep.max_packet_size.max(4) as usize;
+                        let transferred = if len >= residual { len - residual } else { len };
+
+                        let buf = &ep.hid_report_buf.as_slice()[0..transferred];
+                        ep.reports_received += 1;
+                        if ep.reports_received == 1 {
+                            info!("xHCI Slot {}: Live HID Boot report received (len={})!", slot, transferred);
+                        }
+
+                        if ep.is_mouse {
+                            if let Some(report) = parse_hid_boot_mouse(buf) {
+                                crate::drivers::mouse::update_relative(
+                                    report.dx as i32,
+                                    report.dy as i32,
+                                    report.left_button,
+                                    report.right_button,
+                                    report.middle_button,
+                                );
+                            }
+                        } else if ep.is_keyboard {
+                            if let Some(_report) = parse_hid_boot_keyboard(buf) {
+                                // Keyboard report handling
+                            }
+                        }
+
+                        // Re-queue next Normal TRB on ep_ring
+                        let cycle = ep.ep_cycle;
+                        let norm_trb = build_normal_trb(
+                            ep.hid_report_buf.phys_addr(),
+                            ep.max_packet_size.max(4) as u32,
+                            true,
+                            true,
+                            cycle,
+                        );
+
+                        let offset = ep.ep_idx * 16;
+                        let trb_bytes = core::slice::from_raw_parts(
+                            &norm_trb as *const Trb as *const u8,
+                            16,
+                        );
+                        ep.ep_ring.as_mut_slice()[offset..offset + 16].copy_from_slice(trb_bytes);
+                        ep.ep_idx += 1;
+                        if ep.ep_idx == 63 {
+                            ep.ep_idx = 0;
+                            ep.ep_cycle = !ep.ep_cycle;
+                        }
+
+                        compiler_fence(Ordering::SeqCst);
+                        db_regs.write_u32((slot as usize) * 4, ep.dci as u32);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Formats the xHCI controller status, discovered ports, and enumerated devices into `/proc/usb`.
+#[allow(static_mut_refs)]
 pub fn format_proc_usb() -> String {
     use core::fmt::Write;
     let mut out = String::new();
@@ -326,8 +438,8 @@ pub fn format_proc_usb() -> String {
         if info.devices.is_empty() {
             let _ = writeln!(out, "  (No USB devices enumerated)");
         } else {
-            let _ = writeln!(out, "SLOT  PORT  SPEED  VID:PID    CLASS:SUB:PR  DETAILS");
-            let _ = writeln!(out, "----  ----  -----  -------    ------------  -------");
+            let _ = writeln!(out, "SLOT  PORT  SPEED  VID:PID    EP (DCI)  STATUS      REPORTS  DETAILS");
+            let _ = writeln!(out, "----  ----  -----  -------    --------  ------      -------  -------");
             for d in &info.devices {
                 let details = match d.interface_class {
                     0x03 => {
@@ -339,11 +451,22 @@ pub fn format_proc_usb() -> String {
                     0x09 => "Hub",
                     _ => "Generic",
                 };
+                let status_str = if d.configured { "CONFIGURED" } else { "ADDRESSED" };
+                let reports_count = if let Some(ref eps) = ACTIVE_HID_ENDPOINTS {
+                    eps.iter().find(|e| e.slot_id == d.slot_id).map(|e| e.reports_received).unwrap_or(0)
+                } else {
+                    0
+                };
+                let ep_str = if d.endpoint_address != 0 {
+                    format!("0x{:02x} ({})", d.endpoint_address, d.dci)
+                } else {
+                    String::from("None")
+                };
                 let _ = writeln!(
                     out,
-                    "{:<4}  {:<4}  {:<5}  {:04x}:{:04x}  {:02x}:{:02x}:{:02x}      {}",
+                    "{:<4}  {:<4}  {:<5}  {:04x}:{:04x}  {:<8}  {:<10}  {:<7}  {}",
                     d.slot_id, d.port_number, d.speed, d.vendor_id, d.product_id,
-                    d.interface_class, d.interface_subclass, d.interface_protocol, details
+                    ep_str, status_str, reports_count, details
                 );
             }
         }
@@ -354,7 +477,8 @@ pub fn format_proc_usb() -> String {
 
 /// Probes PCI devices for an xHCI USB 3.0 controller, initializes hardware,
 /// brings up DMA Command/Event rings via Driver Kit, executes a verification No-Op,
-/// performs port reset and slot addressing, and enumerates USB device descriptors via EP0.
+/// performs port reset and slot addressing, enumerates USB device descriptors via EP0,
+/// and configures HID endpoints for live input ingestion.
 pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
     let xhci_dev = devices
         .iter()
@@ -637,11 +761,12 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
         }
 
         // -------------------------------------------------------------------
-        // 6. Enumerate Root Hub Ports & USB Device Addressing / Descriptors
+        // 6. Enumerate Root Hub Ports & USB Device Addressing / Descriptors / HID Config
         // -------------------------------------------------------------------
         let mut port_infos = Vec::new();
         let mut discovered_devices = Vec::new();
         let mut dev_buffers = Vec::new();
+        let mut active_hid_endpoints = Vec::new();
         let csz_64 = (hccparams1 & HCCPARAMS1_CSZ) != 0;
 
         for port_num in 1..=max_ports {
@@ -877,9 +1002,9 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
                 dev_desc.b_max_packet_size0
             );
 
-            // 4b: GET_DESCRIPTOR (Configuration, 32 bytes)
+            // 4b: GET_DESCRIPTOR (Configuration, up to 64 bytes to capture Interface, HID & Endpoint descriptors)
             data_buf.zero();
-            let cfg_setup = UsbSetupPacket::get_descriptor(USB_DESC_CONFIGURATION, 0, 32);
+            let cfg_setup = UsbSetupPacket::get_descriptor(USB_DESC_CONFIGURATION, 0, 64);
             let cfg_res = send_control_transfer(
                 &mut ep0_ring,
                 &mut ep0_idx,
@@ -891,13 +1016,16 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
                 &mut er_state,
                 cfg_setup,
                 &mut data_buf,
-                32,
+                64,
             );
 
-            if let Err(e) = cfg_res {
-                warn!("xHCI: Slot {} GET_DESCRIPTOR (Configuration) failed: {}", slot_id, e);
-                continue;
-            }
+            let transferred_cfg = match cfg_res {
+                Ok(n) => n.min(64),
+                Err(e) => {
+                    warn!("xHCI: Slot {} GET_DESCRIPTOR (Configuration) failed: {}", slot_id, e);
+                    continue;
+                }
+            };
 
             let cfg_val = if data_buf.as_slice().len() >= 9 && data_buf.as_slice()[1] == USB_DESC_CONFIGURATION {
                 data_buf.as_slice()[5]
@@ -905,7 +1033,7 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
                 1
             };
 
-            let (if_class, if_sub, if_proto) = scan_interfaces(&data_buf.as_slice()[0..32]).unwrap_or((0, 0, 0));
+            let (if_class, if_sub, if_proto) = scan_interfaces(&data_buf.as_slice()[0..transferred_cfg]).unwrap_or((0, 0, 0));
             let class_name = match if_class {
                 0x03 => {
                     if if_proto == 1 { "HID Boot Keyboard" }
@@ -926,6 +1054,163 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
                 slot_id, dev_desc.id_vendor, dev_desc.id_product, class_name
             );
 
+            // ---------------------------------------------------------------
+            // Slice U3: Endpoint Configuration & HID Activation
+            // ---------------------------------------------------------------
+            let hid_summary = scan_hid_endpoint(&data_buf.as_slice()[0..transferred_cfg]);
+            let mut configured_ep = false;
+            let mut ep_addr = 0u8;
+            let mut ep_dci = 0u8;
+
+            if let Some(hid_ep) = hid_summary {
+                ep_addr = hid_ep.endpoint_address;
+                ep_dci = hid_ep.dci;
+
+                // Passo 1: Ativação via EP0 (SET_CONFIGURATION, SET_PROTOCOL, SET_IDLE)
+                let set_cfg_pkt = UsbSetupPacket::set_configuration(cfg_val);
+                let set_cfg_res = send_control_transfer(
+                    &mut ep0_ring,
+                    &mut ep0_idx,
+                    &mut ep0_cycle,
+                    &db_regs,
+                    slot_id,
+                    &event_ring,
+                    &intr0,
+                    &mut er_state,
+                    set_cfg_pkt,
+                    &mut data_buf,
+                    0,
+                );
+
+                if set_cfg_res.is_ok() {
+                    if hid_ep.interface_subclass == 0x01 {
+                        // Boot Protocol
+                        let set_proto_pkt = UsbSetupPacket::set_protocol(hid_ep.interface_number, 0);
+                        let _ = send_control_transfer(
+                            &mut ep0_ring,
+                            &mut ep0_idx,
+                            &mut ep0_cycle,
+                            &db_regs,
+                            slot_id,
+                            &event_ring,
+                            &intr0,
+                            &mut er_state,
+                            set_proto_pkt,
+                            &mut data_buf,
+                            0,
+                        );
+
+                        let set_idle_pkt = UsbSetupPacket::set_idle(hid_ep.interface_number, 0);
+                        let _ = send_control_transfer(
+                            &mut ep0_ring,
+                            &mut ep0_idx,
+                            &mut ep0_cycle,
+                            &db_regs,
+                            slot_id,
+                            &event_ring,
+                            &intr0,
+                            &mut er_state,
+                            set_idle_pkt,
+                            &mut data_buf,
+                            0,
+                        );
+                    }
+                    info!(
+                        "xHCI Slot {}: Activated HID Boot Protocol (SET_CONFIGURATION 0x{:02x}).",
+                        slot_id, cfg_val
+                    );
+
+                    // Passo 2: ConfigureEndpointCommand
+                    if let (Some(mut ep_ring), Some(mut hid_report_buf), Some(mut ep_input_ctx)) = (
+                        DmaBuffer::allocate_4k(),
+                        DmaBuffer::allocate_4k(),
+                        DmaBuffer::allocate_4k(),
+                    ) {
+                        ep_ring.zero();
+                        hid_report_buf.zero();
+                        ep_input_ctx.zero();
+
+                        // Link TRB at index 63
+                        let ep_link = build_link_trb(ep_ring.phys_addr(), true, true);
+                        let ep_link_bytes = core::slice::from_raw_parts(
+                            &ep_link as *const Trb as *const u8,
+                            16,
+                        );
+                        ep_ring.as_mut_slice()[63 * 16..64 * 16].copy_from_slice(ep_link_bytes);
+
+                        format_configure_ep_input_context(
+                            ep_input_ctx.as_mut_slice(),
+                            csz_64,
+                            port_num,
+                            status.speed,
+                            hid_ep.dci,
+                            hid_ep.max_packet_size,
+                            hid_ep.interval,
+                            ep_ring.phys_addr(),
+                        );
+
+                        let cfg_ep_cmd = build_configure_endpoint_cmd(ep_input_ctx.phys_addr(), slot_id, true);
+                        let cfg_ep_res = send_command(
+                            &mut cmd_ring,
+                            &db_regs,
+                            &event_ring,
+                            &intr0,
+                            &mut cmd_idx,
+                            &mut er_state,
+                            cfg_ep_cmd,
+                        );
+
+                        if let Ok(ev) = cfg_ep_res {
+                            if ev.completion_code() == TRB_COMP_SUCCESS {
+                                configured_ep = true;
+                                info!(
+                                    "xHCI Slot {}: Configured Endpoint 0x{:02x} (DCI {}) for HID Interrupt IN.",
+                                    slot_id, hid_ep.endpoint_address, hid_ep.dci
+                                );
+
+                                // Passo 3: Enqueue initial Normal TRB & Ring Doorbell
+                                let norm_trb = build_normal_trb(
+                                    hid_report_buf.phys_addr(),
+                                    hid_ep.max_packet_size.max(4) as u32,
+                                    true,
+                                    true,
+                                    true,
+                                );
+                                let norm_bytes = core::slice::from_raw_parts(
+                                    &norm_trb as *const Trb as *const u8,
+                                    16,
+                                );
+                                ep_ring.as_mut_slice()[0..16].copy_from_slice(norm_bytes);
+                                compiler_fence(Ordering::SeqCst);
+
+                                // Ring Doorbell for slot_id with Target = dci
+                                db_regs.write_u32((slot_id as usize) * 4, hid_ep.dci as u32);
+
+                                active_hid_endpoints.push(ActiveHidEndpoint {
+                                    slot_id,
+                                    dci: hid_ep.dci,
+                                    endpoint_address: hid_ep.endpoint_address,
+                                    max_packet_size: hid_ep.max_packet_size,
+                                    is_mouse: hid_ep.interface_protocol == 2,
+                                    is_keyboard: hid_ep.interface_protocol == 1,
+                                    ep_ring,
+                                    hid_report_buf,
+                                    ep_idx: 1,
+                                    ep_cycle: true,
+                                    reports_received: 0,
+                                });
+
+                                dev_buffers.push(ep_input_ctx);
+                            } else {
+                                warn!("xHCI Slot {}: ConfigureEndpointCommand failed code {}", slot_id, ev.completion_code());
+                            }
+                        } else {
+                            warn!("xHCI Slot {}: ConfigureEndpointCommand error", slot_id);
+                        }
+                    }
+                }
+            }
+
             discovered_devices.push(XhciUsbDevice {
                 slot_id,
                 port_number: port_num,
@@ -940,6 +1225,9 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
                 interface_protocol: if_proto,
                 configuration_val: cfg_val,
                 max_packet_size: dev_desc.b_max_packet_size0 as u16,
+                endpoint_address: ep_addr,
+                dci: ep_dci,
+                configured: configured_ep,
             });
 
             // Persist device buffers so DMA structures remain valid
@@ -950,6 +1238,10 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
         }
 
         XHCI_DEVICE_BUFFERS = Some(dev_buffers);
+        ACTIVE_HID_ENDPOINTS = Some(active_hid_endpoints);
+        XHCI_DB_REGS = Some(db_regs);
+        XHCI_INTR0 = Some(intr0);
+        XHCI_ER_STATE = er_state;
 
         let info_obj = XhciControllerInfo {
             present: true,
@@ -983,7 +1275,7 @@ pub fn init(devices: &[PciDevice]) -> Option<XhciControllerInfo> {
                 name: "xhci",
                 spdx_license: "GPL-2.0-or-later",
                 origin: DriverOrigin::Native,
-                version: "1.2.0",
+                version: "1.3.0",
             },
             Some(&XHCI_DIAG),
         );

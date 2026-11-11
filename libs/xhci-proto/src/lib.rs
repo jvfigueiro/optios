@@ -135,6 +135,7 @@ pub const TRB_COMP_SHORT_PACKET: u8 = 13;
 // TRB Control bit flags
 pub const TRB_CYCLE: u32 = 1 << 0;
 pub const TRB_TC: u32 = 1 << 1;        // Toggle Cycle (for Link TRB)
+pub const TRB_ISP: u32 = 1 << 2;       // Interrupt on Short Packet
 pub const TRB_CH: u32 = 1 << 4;        // Chain
 pub const TRB_IOC: u32 = 1 << 5;       // Interrupt On Completion
 pub const TRB_IDT: u32 = 1 << 6;       // Immediate Data Transfer
@@ -186,6 +187,12 @@ impl Trb {
         ((self.control >> 24) & 0xFF) as u8
     }
 
+    /// Returns the Endpoint ID / DCI (bits 16..20 of control in transfer events).
+    #[inline]
+    pub fn endpoint_id(&self) -> u8 {
+        ((self.control >> 16) & 0x1F) as u8
+    }
+
     /// Returns the pointer parameter (e.g. command TRB physical address).
     #[inline]
     pub fn cmd_trb_pointer(&self) -> u64 {
@@ -221,6 +228,30 @@ pub fn build_address_device_cmd(input_ctx_phys: u64, slot_id: u8, bsr: bool, cyc
         control |= TRB_CYCLE;
     }
     Trb::new(input_ctx_phys, 0, control)
+}
+
+/// Builds a Configure Endpoint Command TRB (Type 12).
+pub fn build_configure_endpoint_cmd(input_ctx_phys: u64, slot_id: u8, cycle: bool) -> Trb {
+    let mut control = ((TRB_TYPE_CONFIGURE_ENDPOINT as u32) << 10) | ((slot_id as u32) << 24);
+    if cycle {
+        control |= TRB_CYCLE;
+    }
+    Trb::new(input_ctx_phys, 0, control)
+}
+
+/// Builds a Normal TRB (Type 1) for endpoint transfers.
+pub fn build_normal_trb(buf_phys: u64, len: u32, ioc: bool, isp: bool, cycle: bool) -> Trb {
+    let mut control = (TRB_TYPE_NORMAL as u32) << 10;
+    if ioc {
+        control |= TRB_IOC;
+    }
+    if isp {
+        control |= TRB_ISP;
+    }
+    if cycle {
+        control |= TRB_CYCLE;
+    }
+    Trb::new(buf_phys, len, control)
 }
 
 /// Builds a Link TRB (Type 6) pointing back to the beginning of the ring.
@@ -358,6 +389,72 @@ pub fn format_input_context(
     buf[ep0_off + 16..ep0_off + 20].copy_from_slice(&ep0_dw4.to_le_bytes());
 }
 
+/// Sets up an xHCI Input Context buffer for adding an endpoint (e.g. Interrupt IN) via ConfigureEndpointCommand.
+/// Sets Add Context Flags = (1 << 0) | (1 << dci), updates Slot Context Context Entries = dci,
+/// and populates the Endpoint Context at offset ctx_size * dci with EP Type = 7 (Interrupt IN).
+pub fn format_configure_ep_input_context(
+    buf: &mut [u8],
+    csz_64: bool,
+    port_num: u8,
+    speed: PortSpeed,
+    dci: u8,
+    max_packet_size: u16,
+    interval: u8,
+    ep_ring_phys: u64,
+) {
+    let ctx_size = if csz_64 { 64 } else { 32 };
+    assert!(buf.len() >= ctx_size * (dci as usize + 2), "Input Context buffer too small");
+
+    // Clear entire structure
+    for b in buf.iter_mut() {
+        *b = 0;
+    }
+
+    // 1. Input Control Context (at offset 0):
+    // Add Context flags = bit 0 (Slot Context) | bit dci
+    let add_flags: u32 = (1 << 0) | (1 << (dci as u32));
+    buf[4..8].copy_from_slice(&add_flags.to_le_bytes());
+
+    // 2. Slot Context (at offset ctx_size * 1)
+    let slot_off = ctx_size;
+    let speed_val = match speed {
+        PortSpeed::FullSpeed => 1,
+        PortSpeed::LowSpeed => 2,
+        PortSpeed::HighSpeed => 3,
+        PortSpeed::SuperSpeed => 4,
+        PortSpeed::SuperSpeedPlus => 5,
+        PortSpeed::Undefined => 0,
+    };
+
+    // Slot Context DW0: Speed in bits 20..23, Context Entries = dci in bits 27..31
+    let slot_dw0: u32 = ((speed_val & 0x0F) << 20) | ((dci as u32) << 27);
+    buf[slot_off..slot_off + 4].copy_from_slice(&slot_dw0.to_le_bytes());
+
+    // Slot Context DW1: Root Hub Port Number in bits 16..23
+    let slot_dw1: u32 = (port_num as u32) << 16;
+    buf[slot_off + 4..slot_off + 8].copy_from_slice(&slot_dw1.to_le_bytes());
+
+    // 3. Endpoint Context for dci (at offset ctx_size * (dci + 1))
+    let ep_off = ctx_size * (dci as usize + 1);
+    // EP DW0: Interval in bits 16..23
+    let ep_dw0: u32 = (interval as u32) << 16;
+    buf[ep_off..ep_off + 4].copy_from_slice(&ep_dw0.to_le_bytes());
+
+    // EP DW1: CErr = 3 (bits 1..2), EP Type = 7 Interrupt IN (bits 3..5), Max Packet Size (bits 16..31)
+    let ep_dw1: u32 = (3 << 1) | (7 << 3) | ((max_packet_size as u32) << 16);
+    buf[ep_off + 4..ep_off + 8].copy_from_slice(&ep_dw1.to_le_bytes());
+
+    // EP DW2 & DW3: TR Dequeue Pointer with DCS = 1 in bit 0
+    let deq_lo: u32 = (ep_ring_phys as u32) | 1;
+    let deq_hi: u32 = (ep_ring_phys >> 32) as u32;
+    buf[ep_off + 8..ep_off + 12].copy_from_slice(&deq_lo.to_le_bytes());
+    buf[ep_off + 12..ep_off + 16].copy_from_slice(&deq_hi.to_le_bytes());
+
+    // EP DW4: Average TRB Length = max_packet_size.min(8), Max ESIT Payload = max_packet_size
+    let ep_dw4: u32 = (max_packet_size as u32).min(8) | ((max_packet_size as u32) << 16);
+    buf[ep_off + 16..ep_off + 20].copy_from_slice(&ep_dw4.to_le_bytes());
+}
+
 // ---------------------------------------------------------------------------
 // USB Standard Protocol Requests and Descriptors
 // ---------------------------------------------------------------------------
@@ -371,6 +468,8 @@ pub const USB_REQ_GET_CONFIGURATION: u8 = 0x08;
 pub const USB_REQ_SET_CONFIGURATION: u8 = 0x09;
 pub const USB_REQ_GET_INTERFACE: u8 = 0x0A;
 pub const USB_REQ_SET_INTERFACE: u8 = 0x0B;
+pub const USB_REQ_SET_IDLE: u8 = 0x0A;
+pub const USB_REQ_SET_PROTOCOL: u8 = 0x0B;
 
 pub const USB_DESC_DEVICE: u8 = 1;
 pub const USB_DESC_CONFIGURATION: u8 = 2;
@@ -419,6 +518,28 @@ impl UsbSetupPacket {
             USB_REQ_SET_CONFIGURATION,
             config_val as u16,
             0,
+            0,
+        )
+    }
+
+    /// Builds a standard `SET_PROTOCOL` request packet for HID devices.
+    pub const fn set_protocol(interface_num: u8, protocol: u8) -> Self {
+        Self::new(
+            0x21, // Host-to-Device, Class, Interface
+            USB_REQ_SET_PROTOCOL,
+            protocol as u16,
+            interface_num as u16,
+            0,
+        )
+    }
+
+    /// Builds a standard `SET_IDLE` request packet for HID devices.
+    pub const fn set_idle(interface_num: u8, duration: u8) -> Self {
+        Self::new(
+            0x21, // Host-to-Device, Class, Interface
+            USB_REQ_SET_IDLE,
+            (duration as u16) << 8,
+            interface_num as u16,
             0,
         )
     }
@@ -541,6 +662,173 @@ pub fn scan_interfaces(bytes: &[u8]) -> Option<(u8, u8, u8)> {
         offset += len;
     }
     None
+}
+
+/// Standard 7-byte USB Endpoint Descriptor (USB 2.0 Spec 9.6.6).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbEndpointDescriptor {
+    pub b_length: u8,
+    pub b_descriptor_type: u8,
+    pub b_endpoint_address: u8,
+    pub bm_attributes: u8,
+    pub w_max_packet_size: u16,
+    pub b_interval: u8,
+}
+
+impl UsbEndpointDescriptor {
+    /// Parses a slice into a `UsbEndpointDescriptor`.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 7 || bytes[0] < 7 || bytes[1] != USB_DESC_ENDPOINT {
+            return None;
+        }
+        let w_max_packet_size = u16::from_le_bytes([bytes[4], bytes[5]]);
+        Some(Self {
+            b_length: bytes[0],
+            b_descriptor_type: bytes[1],
+            b_endpoint_address: bytes[2],
+            bm_attributes: bytes[3],
+            w_max_packet_size,
+            b_interval: bytes[6],
+        })
+    }
+
+    /// Returns true if this endpoint is an Interrupt IN endpoint.
+    #[inline]
+    pub fn is_interrupt_in(&self) -> bool {
+        (self.b_endpoint_address & 0x80) != 0 && (self.bm_attributes & 0x03) == 0x03
+    }
+
+    /// Computes the xHCI Device Context Index (DCI) for this endpoint.
+    #[inline]
+    pub fn dci(&self) -> u8 {
+        endpoint_dci(self.b_endpoint_address)
+    }
+}
+
+/// Computes the Device Context Index (DCI) for an endpoint address.
+/// In xHCI standard:
+/// - EP0 (bidirectional) = 1
+/// - EP n OUT = n * 2
+/// - EP n IN = (n * 2) + 1
+pub const fn endpoint_dci(endpoint_address: u8) -> u8 {
+    let ep_num = endpoint_address & 0x0F;
+    let is_in = (endpoint_address & 0x80) != 0;
+    if ep_num == 0 {
+        1
+    } else if is_in {
+        (ep_num * 2) + 1
+    } else {
+        ep_num * 2
+    }
+}
+
+/// Summary of discovered HID interface and its Interrupt IN endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbHidEndpointSummary {
+    pub interface_number: u8,
+    pub interface_class: u8,
+    pub interface_subclass: u8,
+    pub interface_protocol: u8,
+    pub endpoint_address: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
+    pub dci: u8,
+}
+
+/// Scans raw configuration descriptor bytes and extracts the first Interrupt IN endpoint for a HID interface.
+pub fn scan_hid_endpoint(bytes: &[u8]) -> Option<UsbHidEndpointSummary> {
+    if bytes.len() < 9 {
+        return None;
+    }
+    let mut offset = 0;
+    let mut current_if: Option<(u8, u8, u8, u8)> = None; // (if_num, class, sub, proto)
+
+    while offset + 2 <= bytes.len() {
+        let len = bytes[offset] as usize;
+        let desc_type = bytes[offset + 1];
+
+        if len == 0 || offset + len > bytes.len() {
+            break;
+        }
+
+        if desc_type == USB_DESC_INTERFACE && len >= 9 {
+            let if_num = bytes[offset + 2];
+            let class = bytes[offset + 5];
+            let sub = bytes[offset + 6];
+            let proto = bytes[offset + 7];
+            current_if = Some((if_num, class, sub, proto));
+        } else if desc_type == USB_DESC_ENDPOINT && len >= 7 {
+            if let Some((if_num, class, sub, proto)) = current_if {
+                let ep_addr = bytes[offset + 2];
+                let ep_attr = bytes[offset + 3];
+                let max_pk = u16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]);
+                let interval = bytes[offset + 6];
+
+                // Check if Interrupt IN ((ep_addr & 0x80) != 0 && (ep_attr & 0x03) == 0x03)
+                if (ep_addr & 0x80) != 0 && (ep_attr & 0x03) == 0x03 {
+                    return Some(UsbHidEndpointSummary {
+                        interface_number: if_num,
+                        interface_class: class,
+                        interface_subclass: sub,
+                        interface_protocol: proto,
+                        endpoint_address: ep_addr,
+                        max_packet_size: max_pk,
+                        interval,
+                        dci: endpoint_dci(ep_addr),
+                    });
+                }
+            }
+        }
+
+        offset += len;
+    }
+    None
+}
+
+/// Standard USB HID Boot Mouse Report (3 or 4 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbHidBootMouseReport {
+    pub left_button: bool,
+    pub right_button: bool,
+    pub middle_button: bool,
+    pub dx: i8,
+    pub dy: i8,
+}
+
+/// Parses a USB HID Boot Protocol mouse report buffer (3+ bytes).
+pub fn parse_hid_boot_mouse(bytes: &[u8]) -> Option<UsbHidBootMouseReport> {
+    if bytes.len() < 3 {
+        return None;
+    }
+    let btn = bytes[0];
+    Some(UsbHidBootMouseReport {
+        left_button: (btn & 0x01) != 0,
+        right_button: (btn & 0x02) != 0,
+        middle_button: (btn & 0x04) != 0,
+        dx: bytes[1] as i8,
+        dy: bytes[2] as i8,
+    })
+}
+
+/// Standard USB HID Boot Keyboard Report (8 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbHidBootKeyboardReport {
+    pub modifiers: u8,
+    pub keycodes: [u8; 6],
+}
+
+/// Parses a USB HID Boot Protocol keyboard report buffer (8 bytes).
+pub fn parse_hid_boot_keyboard(bytes: &[u8]) -> Option<UsbHidBootKeyboardReport> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let mut keycodes = [0u8; 6];
+    keycodes.copy_from_slice(&bytes[2..8]);
+    Some(UsbHidBootKeyboardReport {
+        modifiers: bytes[0],
+        keycodes,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +979,18 @@ mod tests {
     }
 
     #[test]
+    fn test_transfer_event_parsing() {
+        let control = ((TRB_TYPE_TRANSFER_EVENT as u32) << 10) | (3 << 16) | (1 << 24) | TRB_CYCLE;
+        let status = (TRB_COMP_SUCCESS as u32) << 24;
+        let trb = Trb::new(0x2000_1000, status, control);
+        assert_eq!(trb.trb_type(), TRB_TYPE_TRANSFER_EVENT);
+        assert_eq!(trb.completion_code(), TRB_COMP_SUCCESS);
+        assert_eq!(trb.slot_id(), 1);
+        assert_eq!(trb.endpoint_id(), 3);
+        assert!(trb.cycle());
+    }
+
+    #[test]
     fn test_parse_hcsparams1() {
         let val: u32 = (4 << 24) | (8 << 8) | 64;
         let (slots, intrs, ports) = parse_hcsparams1(val);
@@ -793,5 +1093,106 @@ mod tests {
         assert_eq!(desc.id_product, 0x0001);
         assert_eq!(desc.b_max_packet_size0, 64);
         assert_eq!(desc.b_num_configurations, 1);
+    }
+
+    #[test]
+    fn test_dci_calculation() {
+        assert_eq!(endpoint_dci(0x00), 1); // EP0
+        assert_eq!(endpoint_dci(0x01), 2); // EP1 OUT
+        assert_eq!(endpoint_dci(0x81), 3); // EP1 IN (HID Boot Mouse default)
+        assert_eq!(endpoint_dci(0x02), 4); // EP2 OUT
+        assert_eq!(endpoint_dci(0x82), 5); // EP2 IN
+    }
+
+    #[test]
+    fn test_endpoint_descriptor_parsing_and_scanner() {
+        // Raw Configuration descriptor containing Interface (HID Boot Mouse) and Endpoint 0x81
+        let cfg_bytes: [u8; 34] = [
+            // Configuration Descriptor (9 bytes)
+            9, 2, 34, 0, 1, 1, 0, 0xA0, 50,
+            // Interface Descriptor (9 bytes)
+            9, 4, 0, 0, 1, 3, 1, 2, 0, // Class 3 (HID), Sub 1 (Boot), Proto 2 (Mouse)
+            // HID Descriptor (9 bytes)
+            9, 0x21, 0x11, 0x01, 0, 1, 0x22, 52, 0,
+            // Endpoint Descriptor (7 bytes)
+            7, 5, 0x81, 0x03, 0x04, 0x00, 10, // EP 0x81, Interrupt, MaxPacket 4, Interval 10
+        ];
+
+        let ep = scan_hid_endpoint(&cfg_bytes).expect("Failed to find HID Interrupt IN endpoint");
+        assert_eq!(ep.interface_number, 0);
+        assert_eq!(ep.interface_class, 3);
+        assert_eq!(ep.interface_subclass, 1);
+        assert_eq!(ep.interface_protocol, 2);
+        assert_eq!(ep.endpoint_address, 0x81);
+        assert_eq!(ep.max_packet_size, 4);
+        assert_eq!(ep.interval, 10);
+        assert_eq!(ep.dci, 3);
+    }
+
+    #[test]
+    fn test_configure_endpoint_and_normal_trb_builders() {
+        let cfg_cmd = build_configure_endpoint_cmd(0x4000_1000, 2, true);
+        assert_eq!(cfg_cmd.trb_type(), TRB_TYPE_CONFIGURE_ENDPOINT);
+        assert_eq!(cfg_cmd.slot_id(), 2);
+        assert_eq!(cfg_cmd.param, 0x4000_1000);
+        assert!(cfg_cmd.cycle());
+
+        let norm_trb = build_normal_trb(0x5000_0000, 8, true, true, true);
+        assert_eq!(norm_trb.trb_type(), TRB_TYPE_NORMAL);
+        assert_eq!(norm_trb.param, 0x5000_0000);
+        assert_eq!(norm_trb.status, 8);
+        assert!(norm_trb.cycle());
+        assert_ne!(norm_trb.control & TRB_IOC, 0);
+        assert_ne!(norm_trb.control & TRB_ISP, 0);
+    }
+
+    #[test]
+    fn test_format_configure_ep_input_context() {
+        let mut buf = [0u8; 512];
+        format_configure_ep_input_context(
+            &mut buf,
+            false, // 32-byte CSZ
+            5,     // Root hub port
+            PortSpeed::HighSpeed,
+            3,     // DCI
+            8,     // Max packet size
+            10,    // Interval
+            0x6000_0000,
+        );
+
+        // Input Control Context (offset 0): Add flags = bit 0 | bit 3 = 0x09
+        let add_flags = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(add_flags, (1 << 0) | (1 << 3));
+
+        // Slot Context (offset 32): Context entries = 3 in bits 27..31
+        let slot_dw0 = u32::from_le_bytes([buf[32], buf[33], buf[34], buf[35]]);
+        assert_eq!((slot_dw0 >> 27) & 0x1F, 3);
+
+        // Endpoint Context 3 (offset 32 * (3 + 1) = 128)
+        let ep_dw0 = u32::from_le_bytes([buf[128], buf[129], buf[130], buf[131]]);
+        assert_eq!((ep_dw0 >> 16) & 0xFF, 10); // Interval = 10
+
+        let ep_dw1 = u32::from_le_bytes([buf[132], buf[133], buf[134], buf[135]]);
+        assert_eq!((ep_dw1 >> 3) & 0x07, 7); // EP Type = 7 (Interrupt IN)
+        assert_eq!((ep_dw1 >> 16) & 0xFFFF, 8); // MaxPacketSize = 8
+    }
+
+    #[test]
+    fn test_hid_boot_mouse_and_keyboard_decoding() {
+        // Mouse packet: Left click (bit 0), dx = 12, dy = -5
+        let mouse_bytes: [u8; 3] = [0x01, 12, (-5i8) as u8];
+        let mouse = parse_hid_boot_mouse(&mouse_bytes).expect("Failed to parse mouse report");
+        assert!(mouse.left_button);
+        assert!(!mouse.right_button);
+        assert!(!mouse.middle_button);
+        assert_eq!(mouse.dx, 12);
+        assert_eq!(mouse.dy, -5);
+
+        // Keyboard packet: Left Ctrl (bit 0) + Shift (bit 1), keycode 0x04 ('A')
+        let kbd_bytes: [u8; 8] = [0x03, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let kbd = parse_hid_boot_keyboard(&kbd_bytes).expect("Failed to parse keyboard report");
+        assert_eq!(kbd.modifiers, 0x03);
+        assert_eq!(kbd.keycodes[0], 0x04);
+        assert_eq!(kbd.keycodes[1], 0);
     }
 }
