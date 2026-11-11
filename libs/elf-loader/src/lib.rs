@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: Pure ELF64 Executable Parser & Segment Validator
-// Date: 2026-11-10
+// Date: 2026-11-11
 
 //! Pure, `#![no_std]` ELF64 binary loader and program header validator for OptiOS.
 //! Validates ELF magic, target architecture (x86-64), endianness, and enforces strict
@@ -47,6 +47,7 @@ pub enum ElfError {
     AddressOverflow,
     KernelAddressOverlap,
     InvalidEntryPoint,
+    WxViolation,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +130,10 @@ pub fn parse_elf<'a>(data: &'a [u8]) -> Result<ElfBinary<'a>, ElfError> {
 
         if p_type != PT_LOAD {
             continue;
+        }
+
+        if (p_flags & PF_W != 0) && (p_flags & PF_X != 0) {
+            return Err(ElfError::WxViolation);
         }
 
         if p_memsz == 0 {

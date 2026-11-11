@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 João Figueiró
 # Item: Kernel Compilation, USTAR Initramfs Builder & UEFI ISO Packager
-# Date: 2026-11-10
+# Date: 2026-11-11
 
 set -euo pipefail
 
@@ -75,7 +75,7 @@ cp "${EDIT_BIN}" "${INITRAMFS_STAGE}/bin/edit"
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/optios-release"
 NAME="OptiOS"
-VERSION="1.0.0-alpha (Milestone 10)"
+VERSION="0.10.4-alpha (Milestone 10)"
 ID=optios
 ARCH="x86_64"
 FIRMWARE="UEFI"
@@ -86,7 +86,7 @@ USERLAND="Ring 3 (Syscalls, sys_brk alloc, argc/argv, ELF64 & /bin/edit)"
 EOF
 
 cat << 'EOF' > "${INITRAMFS_STAGE}/etc/motd"
-OptiOS 1.0
+OptiOS 0.10.4-alpha
 Copyright (C) 2026 João Figueiró
 EOF
 

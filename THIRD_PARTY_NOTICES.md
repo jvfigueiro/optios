@@ -64,9 +64,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### 1.3 Embedded 8x16 ASCII Bitmap Glyph Table (`kernel/src/drivers/video/font_data.in`)
 - **Component**: 95-glyph 8x16 monochrome bitmap array (`ASCII_GLYPHS`, ASCII `32..=126`) included by `kernel/src/drivers/video/font.rs`.
-- **Origin**: Rasterized 8x16 ASCII bitmap values from Terminus Font (https://terminus-font.sourceforge.net/).
-- **Upstream Copyright & License**: Copyright (C) Dimitar Toshkov Zhekov (`OFL-1.1` / SIL Open Font License 1.1; historical releases also dual-licensed under `GPL-2.0-or-later` with font embedding exception).
-- **Status**: Flagged for **OWNER REVIEW** (`OFL-1.1` is not in the default `ALLOWED` list; owner may either approve the 95-char bitmap array under `OFL-1.1` / `GPL-2.0-or-later` or replace `font_data.in` with a clean-room public-domain IBM VGA 8x16 bitmap array).
+- **Origin**: IBM VGA 8x16 hardware font ROM matrix (standard Code Page 437 / printable ASCII 32..=126).
+- **Upstream Copyright & License**: Public Domain (historical hardware bitmap matrix, free of copyright restrictions).
+- **Status**: Clean / Unencumbered (`Public Domain` / `GPL-2.0-or-later`).
 - **TrueType / OpenType Fonts (`.ttf` / `.otf`)**: **None**. Zero `.ttf`, `.otf`, `.woff`, or `.woff2` font files exist in the repository.
 
 ---

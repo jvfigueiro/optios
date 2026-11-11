@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: Userland ELF64 Process Spawner & Ring 3 Execution Engine
-// Date: 2026-11-10
+// Date: 2026-11-11
 
 //! Userland Process Spawner for OptiOS.
 //! Loads ELF64 executables from the VFS, maps segments into user-accessible virtual pages,
@@ -93,10 +93,24 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
         }
     }
 
-    // 5. Map each PT_LOAD segment into user space
-    let page_flags = vmm::flags::PRESENT | vmm::flags::WRITABLE | vmm::flags::USER_ACCESSIBLE;
-
+    // 5. Map each PT_LOAD segment into user space with strict W^X enforcement
     for seg in &elf.segments {
+        let is_exec = (seg.flags & optios_elf_loader::PF_X) != 0;
+        let is_write = (seg.flags & optios_elf_loader::PF_W) != 0;
+
+        if is_exec && is_write {
+            clean_current_process();
+            return Err("ELF segment violates W^X policy (simultaneously writable and executable)");
+        }
+
+        let mut seg_page_flags = vmm::flags::PRESENT | vmm::flags::USER_ACCESSIBLE;
+        if is_write {
+            seg_page_flags |= vmm::flags::WRITABLE;
+        }
+        if !is_exec {
+            seg_page_flags |= vmm::flags::NO_EXECUTE;
+        }
+
         let vaddr_start = seg.vaddr & !0xFFF;
         let vaddr_end = (seg.vaddr + seg.mem_size + 0xFFF) & !0xFFF;
 
@@ -115,7 +129,34 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
                 core::ptr::write_bytes(frame_ptr, 0, 4096);
             }
 
-            if let Err(e) = vmm::map_page(curr_vaddr, paddr, page_flags) {
+            // Copy file data intersecting with this 4 KiB frame directly via HHDM
+            let file_data_end = seg.vaddr.saturating_add(seg.file_data.len() as u64);
+            if curr_vaddr < file_data_end && (curr_vaddr + 4096) > seg.vaddr {
+                let page_offset = if seg.vaddr > curr_vaddr {
+                    (seg.vaddr - curr_vaddr) as usize
+                } else {
+                    0
+                };
+                let file_offset = if curr_vaddr > seg.vaddr {
+                    (curr_vaddr - seg.vaddr) as usize
+                } else {
+                    0
+                };
+                let bytes_in_page = 4096 - page_offset;
+                let bytes_in_file = seg.file_data.len().saturating_sub(file_offset);
+                let copy_len = core::cmp::min(bytes_in_page, bytes_in_file);
+                if copy_len > 0 {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            seg.file_data.as_ptr().add(file_offset),
+                            frame_ptr.add(page_offset),
+                            copy_len,
+                        );
+                    }
+                }
+            }
+
+            if let Err(e) = vmm::map_page(curr_vaddr, paddr, seg_page_flags) {
                 pmm::free_frame(paddr);
                 clean_current_process();
                 return Err(e);
@@ -124,21 +165,6 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
             user_pages.push((curr_vaddr, paddr));
             curr_vaddr += 4096;
         }
-
-        // Copy segment file data to destination user memory
-        unsafe {
-            if crate::arch::x86_64::user_copy::is_smap_enabled() {
-                crate::arch::x86_64::user_copy::stac();
-            }
-            core::ptr::copy_nonoverlapping(
-                seg.file_data.as_ptr(),
-                seg.vaddr as *mut u8,
-                seg.file_data.len(),
-            );
-            if crate::arch::x86_64::user_copy::is_smap_enabled() {
-                crate::arch::x86_64::user_copy::clac();
-            }
-        }
     }
 
     // 6. Define dynamic heap boundaries (page-aligned right after highest PT_LOAD segment)
@@ -146,7 +172,11 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
     let heap_current = heap_start;
     let heap_max = heap_start + (16 * 1024 * 1024); // 16 MiB user heap limit
 
-    // 7. Allocate and map 16 KiB User Stack
+    // 7. Allocate and map 16 KiB User Stack (W^X enforced: Non-Executable)
+    let stack_page_flags = vmm::flags::PRESENT
+        | vmm::flags::WRITABLE
+        | vmm::flags::USER_ACCESSIBLE
+        | vmm::flags::NO_EXECUTE;
     let stack_base = USER_STACK_TOP - (USER_STACK_PAGES * 4096);
     for i in 0..USER_STACK_PAGES {
         let page_vaddr = stack_base + (i * 4096);
@@ -163,7 +193,7 @@ pub fn spawn_user_process_with_args(path: &str, args: &[&str]) -> Result<i32, &'
             core::ptr::write_bytes(frame_ptr, 0, 4096);
         }
 
-        if let Err(e) = vmm::map_page(page_vaddr, paddr, page_flags) {
+        if let Err(e) = vmm::map_page(page_vaddr, paddr, stack_page_flags) {
             pmm::free_frame(paddr);
             clean_current_process();
             return Err(e);

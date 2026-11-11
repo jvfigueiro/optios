@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: Pure Userland C/Rust Runtime, POSIX Syscalls & Dynamic Heap Allocator
-// Date: 2026-11-10
+// Date: 2026-11-11
 
 //! Minimal, pure `#![no_std]` userland standard library for OptiOS.
 //! Provides POSIX system call wrappers, print/println macros, command-line argument
@@ -188,6 +188,24 @@ pub fn close(fd: u64) -> Result<(), i64> {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_mtime: i64,
+    pub st_ctime: i64,
+}
+
 pub fn stat(path: &str, statbuf: &mut [u8]) -> Result<(), i64> {
     let mut null_term_path = [0u8; 256];
     let len = path.len().min(255);
@@ -195,6 +213,20 @@ pub fn stat(path: &str, statbuf: &mut [u8]) -> Result<(), i64> {
     null_term_path[len] = 0;
 
     let res = unsafe { syscall2(SYS_STAT, null_term_path.as_ptr() as u64, statbuf.as_mut_ptr() as u64) };
+    if res >= 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+pub fn stat_struct(path: &str, stat: &mut Stat) -> Result<(), i64> {
+    let mut null_term_path = [0u8; 256];
+    let len = path.len().min(255);
+    null_term_path[..len].copy_from_slice(&path.as_bytes()[..len]);
+    null_term_path[len] = 0;
+
+    let res = unsafe { syscall2(SYS_STAT, null_term_path.as_ptr() as u64, stat as *mut Stat as u64) };
     if res >= 0 {
         Ok(())
     } else {

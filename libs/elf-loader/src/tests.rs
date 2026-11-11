@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: Pure ELF64 Parser Unit Tests
-// Date: 2026-11-10
+// Date: 2026-11-11
 
 #[cfg(test)]
 mod tests {
@@ -108,5 +108,18 @@ mod tests {
     fn test_truncated_buffer() {
         let data = [0x7Fu8, b'E', b'L', b'F', 2, 1, 1];
         assert_eq!(parse_elf(&data).err(), Some(ElfError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_elf_wx_segment_violation_rejected() {
+        let mut elf_bytes = build_minimal_elf64(0x400000, 4096, 128, 0x400000);
+        let ph_offset = 64;
+        // Mark segment as simultaneously writable and executable (PF_W | PF_X)
+        elf_bytes[ph_offset + 4..ph_offset + 8].copy_from_slice(&(PF_W | PF_X).to_le_bytes());
+        assert_eq!(
+            parse_elf(&elf_bytes).err(),
+            Some(ElfError::WxViolation),
+            "Should reject ELF segment that is simultaneously writable and executable (W^X violation)"
+        );
     }
 }

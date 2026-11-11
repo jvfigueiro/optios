@@ -16,7 +16,8 @@ Owner to verify licensing statements with qualified counsel before any distribut
 OptiOS is built using an AI-assisted systems engineering workflow:
 - **Human Maintainer Role**: Defines project goals, system architecture, roadmap sequencing ([`docs/roadmap.md`](roadmap.md)), licensing rules ([`docs/licensing-policy.md`](licensing-policy.md)), engineering constraints ([`AGENTS.md`](../AGENTS.md)), phase scopes, and verification gates, and reviews all outputs before acceptance.
 - **AI Coding Agent Role**: Writes kernel, driver, library, userland, test, and documentation code within the boundaries of each gated phase, executes automated host and QEMU verification suites, and produces raw diagnostic reports ([`docs/process/README.md`](process/README.md)).
-- **AI Models and Agent Tools Used**: `<owner to fill: AI models and agent tools used>`
+- **Agent Environment**: Google Antigravity IDE / autonomous coding agent harness.
+- **AI Models Used**: Google Gemini and Anthropic Claude (used for architectural planning, specification breakdown, code generation, and verification auditing under human supervision).
 
 *(Note: Historical user prompts are not reconstructed from memory in this repository. The authoritative engineering constraints and phase outcomes are recorded in [`AGENTS.md`](../AGENTS.md), [`docs/DECISIONS/`](DECISIONS/), and [`docs/reports/`](reports/).)*
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 João Figueiró
 # Item: QEMU Q35 + OVMF Execution & Automated Milestone 10 Verification Script
-# Date: 2026-11-10
+# Date: 2026-11-11
 
 set -euo pipefail
 
@@ -178,7 +178,7 @@ finally:
     grep -q "Configured Endpoint 0x81 (DCI 3) for HID Interrupt IN" "${SERIAL_LOG}" || { echo "FAILURE: xHCI Endpoint DCI 3 configuration missing"; exit 1; }
     grep -q "Live HID Boot report received" "${SERIAL_LOG}" || { echo "FAILURE: Live xHCI HID Boot report ingestion missing"; exit 1; }
     grep -q "Syscall subsystem initialized" "${SERIAL_LOG}" || { echo "FAILURE: Syscall subsystem initialization missing"; exit 1; }
-    grep -q "OptiOS 1.0" "${SERIAL_LOG}" || { echo "FAILURE: OptiOS 1.0 MOTD header missing"; exit 1; }
+    grep -q "OptiOS 0.10.4-alpha" "${SERIAL_LOG}" || { echo "FAILURE: OptiOS 0.10.4-alpha MOTD header missing"; exit 1; }
     grep -q "Copyright (C) 2026 João Figueiró" "${SERIAL_LOG}" || grep -q "Copyright (C) 2026 Joao Figueiro" "${SERIAL_LOG}" || { echo "FAILURE: Copyright MOTD missing"; exit 1; }
     grep -q "opti-sh: Executing command '/bin/cat /proc/drivers'" "${SERIAL_LOG}" || { echo "FAILURE: /proc/drivers execution missing"; exit 1; }
     grep -q "opti-sh: Executing command '/bin/cat /proc/usb'" "${SERIAL_LOG}" || { echo "FAILURE: /proc/usb execution missing"; exit 1; }

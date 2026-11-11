@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: Fullscreen Interactive Diagnostic Terminal (opti-sh)
-// Date: 2026-11-10
+// Date: 2026-11-11
 
 //! Fullscreen Interactive Diagnostic Terminal (`opti-sh`) for OptiOS.
 //! Provides command-line hardware diagnostics, line editing, command history,
@@ -41,7 +41,7 @@ impl Shell {
 
     /// Initializes the shell terminal session with the MOTD and prompt.
     pub fn init_session(&self) {
-        console::print_str("\nOptiOS 1.0\n");
+        console::print_str("\nOptiOS 0.10.4-alpha\n");
         console::print_str("Copyright (C) 2026 João Figueiró\n\n");
         console::print_str(PROMPT);
     }
@@ -158,7 +158,7 @@ impl Shell {
     }
 
     fn cmd_uname(&self, _args: &[&str]) {
-        self.println("OptiOS optios 1.0.0 Milestone 10 (FAT32 VFS Mounts & Ring 3 Editor) x86_64 2026-11-10");
+        self.println("OptiOS optios 0.10.4-alpha Milestone 10 (FAT32 VFS Mounts & Ring 3 Editor) x86_64 2026-11-11");
     }
 
     fn cmd_dmesg(&self) {

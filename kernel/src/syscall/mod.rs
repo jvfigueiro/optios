@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: POSIX Syscall Dispatcher & AMD64 Syscall/Sysretq Architecture
-// Date: 2026-11-10
+// Date: 2026-11-11
 
 //! POSIX System Call Subsystem for OptiOS.
 //! Configures MSRs (IA32_EFER, IA32_STAR, IA32_LSTAR, IA32_FMASK), sets up TSS kernel stack,
@@ -534,14 +534,66 @@ fn sys_brk(new_brk: u64) -> i64 {
     }
 }
 
-fn sys_stat(path_ptr: *const u8, _statbuf: *mut u8) -> i64 {
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_mtime: i64,
+    pub st_ctime: i64,
+}
+
+fn sys_stat(path_ptr: *const u8, statbuf: *mut u8) -> i64 {
     let path = match copy_cstr_from_user(path_ptr, 256) {
         Ok(s) => s,
         Err(e) => return -(e as i64),
     };
 
     match vfs::stat(&path) {
-        Ok(_) => 0,
+        Ok(st) => {
+            if !statbuf.is_null() {
+                let is_dir = st.file_type == vfs::FileType::Directory;
+                let mode = if is_dir {
+                    st.mode | 0o040000 // S_IFDIR
+                } else {
+                    st.mode | 0o100000 // S_IFREG
+                };
+                let stat_obj = Stat {
+                    st_dev: 1,
+                    st_ino: 1,
+                    st_mode: mode,
+                    st_nlink: 1,
+                    st_uid: 0,
+                    st_gid: 0,
+                    st_rdev: 0,
+                    st_size: st.size as i64,
+                    st_blksize: 4096,
+                    st_blocks: ((st.size + 511) / 512) as i64,
+                    st_atime: 0,
+                    st_mtime: 0,
+                    st_ctime: 0,
+                };
+                let stat_slice = unsafe {
+                    core::slice::from_raw_parts(
+                        &stat_obj as *const Stat as *const u8,
+                        core::mem::size_of::<Stat>(),
+                    )
+                };
+                if let Err(e) = copy_to_user(statbuf, stat_slice) {
+                    return -(e as i64);
+                }
+            }
+            0
+        }
         Err(e) => -(e as i64),
     }
 }
@@ -561,7 +613,7 @@ fn sys_uname(buf: *mut UtsName) -> i64 {
     };
     copy_cstr(&mut uts.sysname, b"OptiOS");
     copy_cstr(&mut uts.nodename, b"optios");
-    copy_cstr(&mut uts.release, b"0.10.0-alpha");
+    copy_cstr(&mut uts.release, b"0.10.4-alpha");
     copy_cstr(&mut uts.version, b"Milestone 10 (SATA AHCI, FAT32 VFS & Ring 3)");
     copy_cstr(&mut uts.machine, b"x86_64");
     copy_cstr(&mut uts.domainname, b"local");

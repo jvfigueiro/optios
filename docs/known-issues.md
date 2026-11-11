@@ -26,15 +26,20 @@ This document records the current operational boundaries of OptiOS and every ope
 
 ---
 
-## 2. Open Audit Items from `docs/reports/10.1-verification.md`
+## 2. Audit Items Status (`docs/reports/10.1-verification.md` & `docs/reports/closure-audit.md`)
 
-*(Note: Items **P0.1**, **P0.2**, **P0.4**, **P0.5**, **V4**, **P2.2**, and **P2.5** from `10.1-verification.md` were resolved in Phases 2–4 and H2. The items below remain open.)*
+All Priority 0 (P0) security and memory protection items from `10.1-verification.md` have been **100% resolved and verified** (see [`docs/reports/closure-audit.md`](reports/closure-audit.md)):
+- **P0.1 (CR4.SMEP/SMAP)**: Resolved in Phase 2.
+- **P0.2 (VFS noexec Policy)**: Resolved in Phase 2.
+- **P0.3 (W^X Enforcement on ELF Segments & User Stack, `sys_stat`)**: Resolved in Closure Task H10.
+- **P0.4 (Per-Process File Descriptors)**: Resolved in Phase 2.
+- **P0.5 (Kernel Memory Frame Allocation Accounting)**: Resolved in Phase 2.
 
-### Priority 0 — Security & Memory Protection (`P0`)
+Additionally:
+- **P2.3 (Version String Divergence)**: Resolved in Task H10 (`OptiOS 0.10.4-alpha`).
+- **Asset-1 (`font_data.in` Provenance)**: Resolved in Task H10 (replaced with clean public-domain IBM VGA 8x16 font).
 
-| ID | Issue Summary | Current Behavior & Risk | Target Resolution |
-| :--- | :--- | :--- | :--- |
-| **P0.3** | **Missing W^X Enforcement on ELF `PT_LOAD` Segments & User Stack** | [`kernel/src/syscall/loader.rs`](../kernel/src/syscall/loader.rs) maps ELF segments and the user stack with `PRESENT \| WRITABLE \| USER_ACCESSIBLE` without setting `NO_EXECUTE` on non-executable segments or clearing `WRITABLE` on read-only `.text` segments (`sys_brk` heap pages do set `NO_EXECUTE`). Additionally, `sys_stat` checks `path_ptr` via `copy_cstr_from_user` but ignores `_statbuf`. | Inspect ELF `p_flags` (`PF_R`, `PF_W`, `PF_X`) during segment mapping, enforce `NO_EXECUTE` on the user stack, and copy `Stat` output to `_statbuf` via `copy_to_user`. |
+The non-blocking Priority 1 and Priority 2 items below remain tracked on the engineering roadmap:
 
 ### Priority 1 — Correctness & Protocol Hardening (`P1`)
 
@@ -53,6 +58,4 @@ This document records the current operational boundaries of OptiOS and every ope
 | ID | Issue Summary | Current Behavior & Risk | Target Resolution |
 | :--- | :--- | :--- | :--- |
 | **P2.1** | **Host Unit Test for `AllowedCommand` Write Opcode Rejection** | `AllowedCommand` in `libs/ahci-proto` prevents constructing write commands in safe Rust, but lacks a dedicated unit test asserting write opcodes (`0x30`, `0x34`, `0x35`) are rejected. | Add an explicit unit test in `libs/ahci-proto/src/tests.rs`. |
-| **P2.3** | **Version String Divergence (`OptiOS 1.0` vs `0.10.x-alpha`)** | `/etc/motd` and `/etc/optios-release` generated in `scripts/build.sh` display `OptiOS 1.0` / `1.0.0-alpha`, whereas `sys_uname` and Git tags use `0.10.x`. *(Kept unchanged during public-readiness hygiene because `scripts/run.sh` asserts `OptiOS 1.0` in the MOTD).* | Align `/etc/motd`, `/etc/optios-release`, `sys_uname`, and `scripts/run.sh` to a single `0.10.x-alpha` version string in the next code phase. |
 | **P2.4** | **Historical Milestone 5 Errata Note** | Earlier Milestone 5 notes are captured in [`docs/DECISIONS/0006-milestone-5-1-hardening-and-ahci-robustness.md`](DECISIONS/0006-milestone-5-1-hardening-and-ahci-robustness.md) rather than a standalone `docs/reports/` file. | Documented in ADR 0006 and [`docs/reports/10.1-verification.md`](reports/10.1-verification.md). |
-| **Asset-1** | **Embedded 8x16 Bitmap Font (`font_data.in`) Provenance Review** | `kernel/src/drivers/video/font_data.in` contains a 95-glyph ASCII 8x16 bitmap array generated from Terminus Font (`OFL-1.1`). | Disclosed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) Section 1.3 for owner review. |
