@@ -30,4 +30,4 @@ To transition OptiOS from a static boot-time diagnostic screen to a live interac
 
 - OptiOS becomes a responsive, interrupt-driven live diagnostic environment.
 - Full PCI bus scanning (`0..=255` with multi-function detection and BAR0..BAR5 inspection) accurately inventories modern Q35/PCIe/AHCI controllers.
-- Sets the foundation for future storage drivers (AHCI/SATA) and preemptive multitasking.
+- Sets the foundation for future storage drivers (AHCI/SATA) and preemptive multitasking (not implemented / planned in R5).

@@ -1,12 +1,14 @@
 # OptiOS — Engineering Rules
 
+> **Contextual Note**: This document defines the human-authored engineering, safety, licensing, and architectural constraints enforced on AI coding agents working on OptiOS. All architecture, scope, and acceptance decisions remain under human maintainer authority.
+
 ## A. Working Rules
 
 1. **Evidence before fixes**: Never change what you cannot first demonstrate.
 2. **Paste raw output**: Paste raw output (cargo, QEMU serial, grep, diff). No summaries in place of output.
 3. **Strict scope**: Touch only what the phase names; list every file touched.
 4. **Integrity and safety**: No test edits just to force a pass (state the reason for any test edit); no git revert/reset/checkout; no disk-write code paths without explicit owner authorization; read-only must stay provable.
-5. **Language and terminology**: English for identifiers, comments, logs and docs. Say "POSIX-oriented", never "POSIX-compliant". Never document a feature that is not implemented.
+5. **Language and terminology**: English for identifiers, comments, logs and docs. Say "POSIX-oriented", never claim full POSIX compliance/certification. Never document a feature that is not implemented.
 6. **Snapshot before each phase**: Git commit if a repo exists, otherwise `tar czf ../optios-<phase>-$(date +%Y%m%d).tar.gz --exclude=target --exclude=build .`.
 7. **Gated phases**: Finish, report, STOP, wait for owner approval.
 
@@ -78,7 +80,7 @@ in the repository MUST begin with the standardized OptiOS copyright header:
 
 (Using `#` for shell/Python scripts after the shebang line, or `/* ... */` / `//` as appropriate for linker scripts.)
 The `Date:` field is date only (`YYYY-MM-DD`), with no hour or minute. The date is the date of the last edit to that file, and it is only updated when the file's content actually changes (never by tooling that merely touches the file).
-Do not include "All rights reserved".
+Do not include legacy proprietary reservation phrases in copyright headers.
 
 ## 4.3 Licensing & Provenance
 

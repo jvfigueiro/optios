@@ -69,7 +69,7 @@ High-level kernel subsystems interact with devices strictly through class traits
 - **`BlockDevice`**:
   - Sector-granular storage interface (`read_sectors`, `sector_size`, `total_sectors`).
   - Read-Only guarantee enforced by construction: write commands are excluded from `AllowedCommand`.
-  - Implemented by AHCI SATA drives (`AhciPort`), NVMe controllers, and RAM disks.
+  - Implemented by AHCI SATA drives (`AhciPort`), and Planned in R4 for NVMe controllers and RAM disks.
 
 - **`InputDevice`**:
   - Unified event model for human interface peripherals (`Mouse`, `Keyboard`, `Touchscreen`).

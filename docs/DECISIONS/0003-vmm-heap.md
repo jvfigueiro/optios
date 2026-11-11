@@ -27,4 +27,4 @@ While Milestone 2 established physical memory allocation (PMM) and CPU protectio
 
 - The kernel gains full dynamic allocation capabilities, unlocking idiomatic Rust collections.
 - Virtual memory mapping is now fine-grained and independent of bootloader structures.
-- Establishes the prerequisite memory foundation for future multitasking, process isolation, and dynamic device drivers.
+- Establishes the prerequisite memory foundation for future multitasking (not implemented / planned in R5), process isolation, and dynamic device drivers.

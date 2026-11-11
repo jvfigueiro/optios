@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 João Figueiró
 // Item: POSIX Architectural Foundation Design Note
-// Date: 2026-11-09
+// Date: 2026-11-11
 -->
 
 # OptiOS POSIX Foundation — Architectural Design Note
@@ -11,7 +11,7 @@
 
 This document establishes the architectural roadmap for transitioning from OptiOS's current internal VFS API to a true POSIX-style I/O subsystem.
 
-The current implementation is strictly **POSIX-oriented** in its concepts, naming, and error number assignments, but is **not POSIX-compliant**. Full POSIX compliance requires user-space processes, address space isolation, file descriptor inheritance, and standard system call interfaces, which are scheduled for subsequent milestones.
+The current implementation is strictly **POSIX-oriented** in its concepts, naming, and error number assignments, and is not certified for full POSIX compliance. Full POSIX compatibility requires user-space processes, address space isolation, file descriptor inheritance, and standard system call interfaces, which are scheduled for subsequent milestones.
 
 ---
 

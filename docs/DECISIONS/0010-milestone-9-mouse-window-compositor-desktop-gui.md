@@ -53,6 +53,6 @@ A robust GUI foundation requires:
 
 ## Consequences
 
-- OptiOS now possesses a dual interface: a classical, high-contrast POSIX text console by default, and a full multitasking windowed graphical desktop on demand.
+- OptiOS now possesses a dual interface: a classical, high-contrast POSIX-oriented text console by default, and a multi-window graphical desktop on demand (multitasking is not implemented / planned in R5).
 - Host test coverage expanded to 62 unit tests across 6 independent library crates.
 - Verified end-to-end under QEMU with automated keyboard and mouse injection.
