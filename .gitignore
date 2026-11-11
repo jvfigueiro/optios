@@ -9,7 +9,6 @@ vendor/
 *.log
 *.ppm
 screenshot.png
-.gemini/
 .agent/
 .claude/
 *.swp
