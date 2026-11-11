@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 João Figueiró
+# Item: Pinned Rust Toolchain Configuration
+# Date: 2026-11-11
+
+[toolchain]
+channel = "stable"
+components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy"]
+targets = ["x86_64-unknown-none", "x86_64-unknown-linux-gnu"]
+profile = "default"
